@@ -1,0 +1,158 @@
+admin:
+  jwt_secret: ${JWT_SECRET:-weix-secret-key-change-me}
+  password: ${ADMIN_PASSWORD:-admin123}
+  username: admin
+ai:
+  amap_key: ${AMAP_KEY:-b99385f85bc12ffc5ed25638d72e6460}
+  amap_security_key: ${AMAP_SECURITY_KEY:-}
+  api_key: sk-b323b2e20026499980f6c26124a10260
+  base_url: https://api.deepseek.com
+  max_tokens: 2000
+  model: deepseek-v4-pro
+  persona_message_limit: 3000
+  persona_mode: contextual
+  persona_since_days: 90
+  provider: deepseek
+  system_prompt: 你是一个友好的微信助手，可以回答问题、提供建议、帮助用户解决问题。
+  temperature: 0.7
+anti_detect:
+  circuit_breaker_threshold: 3
+  cooldown_per_session: 30
+  macos:
+    max_send_interval: 20
+    min_send_interval: 8
+  max_messages_per_minute: 20
+  max_send_interval: 45
+  min_send_interval: 15
+auto_reply:
+  enabled: true
+  group_chat_mode: whitelist
+  group_whitelist:
+  - 43347418937@chatroom
+  private_chat_mode: whitelist
+  private_whitelist:
+  - wxid_qdstjb2fu3mm22
+  - wxid_79b3lgj5l05322
+  - wxid_cu81pqs1lkc222
+  - wxid_orkf3mhszsam12
+  reply_mode: all
+  rules:
+  - enabled: true
+    name: 陪玩价格FAQ
+    patterns:
+    - 多少钱
+    - 价格
+    - 怎么收费
+    priority: 10
+    reply: 陪玩价格：王者荣耀钻石以下 ¥30/h，英雄联盟钻石以上 ¥50/h，具体以陪玩师报价为准
+    type: keyword
+  - enabled: true
+    name: 如何点单FAQ
+    patterns:
+    - 怎么下单
+    - 如何点单
+    - 点单流程
+    priority: 9
+    reply: 回复「点单」或「陪玩」，按格式填写：游戏 段位 时长 预算 备注
+    type: keyword
+database:
+  url: sqlite+aiosqlite:///data/weix.db
+forward_rules:
+- name: 陪玩订单转发
+  targets:
+  - 陪玩接单群@chatroom
+  template: peiwang_order_notify
+  trigger: workflow:peiwang_order_flow.FORWARD
+- name: 投诉转发
+  targets:
+  - 客服处理群@chatroom
+  - 管理员群@chatroom
+  template: '⚠️ 紧急反馈
+
+    内容：{message}
+
+    发送人：{user_name}'
+  trigger: keyword:投诉,紧急,退款
+macos_sender:
+  click_x_ratio: 0.5
+  click_y_ratio: 0.95
+  group_search_arrows: 2
+  method: applescript
+  search_result_delay: 5.0
+  type_delay: 0.3
+  window_activate_delay: 0.5
+monitor:
+  poll_interval: 2
+platform: auto
+statistics:
+  daily_report_time: '22:00'
+  data_retention_days: 30
+  weekly_report_day: 6
+  weekly_report_time: '20:00'
+templates:
+- content: '🎮 请按格式填写：
+
+    游戏 段位 时长 预算 备注
+
+
+    示例：英雄联盟 钻石 2h ¥50 打野'
+  name: peiwang_order_form
+  title: 陪玩点单
+  type: card
+- content: '🎮 **陪玩订单确认**
+
+    下单人：{user_name}
+
+    游戏：{game} | 段位：{rank}
+
+    时长：{hours}h | 预算：¥{budget}/h
+
+    备注：{notes}
+
+    💰 预估：¥{total}
+
+    回复「确认」发布，「修改」重填'
+  name: peiwang_order_confirm
+  type: form
+- content: '🎯 **新陪玩订单** #{order_id}
+
+    游戏：{game} | 段位：{rank}
+
+    时长：{hours}h | 预算：¥{budget}/h
+
+    备注：{notes}
+
+    回复「接单 {order_id}」抢单'
+  name: peiwang_order_notify
+  type: card
+wcf:
+  enabled: true
+  host: 127.0.0.1
+  port: 10010
+wechat:
+  macos:
+    data_dir: auto
+    version: 4.x
+  windows:
+    data_dir: auto
+    version: 3.9.12.51
+workflow_engine: legacy
+workflows:
+- description: 陪玩点单流程
+  forward_to: 陪玩接单群@chatroom
+  name: peiwang_order_flow
+  states:
+  - name: START
+    on_enter: send_template:peiwang_order_form
+  - name: CONFIRM
+    on_enter: parse_order+send_template:peiwang_order_confirm
+  - name: FORWARD
+    on_enter: send_template:peiwang_order_notify to 接单群
+  - name: ASSIGN
+    on_enter: 记录接单人+私聊双方对接
+  trigger_intents:
+  - 点单
+  - 陪玩
+  - 下单
+  - 来个陪玩
+  - 找陪玩
