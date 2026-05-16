@@ -23,6 +23,8 @@ class _BaseMacOSSender(BaseMessageSender):
     # 所有发送器实例共享的"最后活动时间戳"
     # 任意发送器发送后更新，其他发送器据此判断是否需要重新搜索
     _global_last_activity: float = 0.0
+    _global_send_lock: asyncio.Lock | None = None
+    _global_send_lock_loop: asyncio.AbstractEventLoop | None = None
 
     def __init__(self):
         config = get_config()
@@ -34,7 +36,6 @@ class _BaseMacOSSender(BaseMessageSender):
 
         self._last_receiver = ""
         self._last_send_time: float = 0.0
-        self._send_lock = asyncio.Lock()
 
     # --- 子类覆盖 ---
 
@@ -58,7 +59,7 @@ class _BaseMacOSSender(BaseMessageSender):
             return False
         safe_msg = self._escape(msg)
         safe_receiver = self._escape(receiver)
-        async with self._send_lock:
+        async with self._get_global_send_lock():
             return await self._do_send(safe_msg, safe_receiver, force_skip=force_skip)
 
     async def open_chat(self, receiver: str) -> bool:
@@ -67,7 +68,7 @@ class _BaseMacOSSender(BaseMessageSender):
             logger.error("接收者为空，无法打开聊天")
             return False
         safe_receiver = self._escape(receiver)
-        async with self._send_lock:
+        async with self._get_global_send_lock():
             script = self._build_open_chat_script(safe_receiver)
             success = await self._run(script, "open_chat")
             if success:
@@ -319,6 +320,18 @@ class _BaseMacOSSender(BaseMessageSender):
         escaped = text.replace("\\", "\\\\").replace('"', '\\"')
         return escaped.replace("\n", " ").replace("\r", " ")
 
+    @staticmethod
+    def _get_global_send_lock() -> asyncio.Lock:
+        """同一个微信 UI 只能串行操作，私聊、群聊和停靠共用一把锁。"""
+        loop = asyncio.get_running_loop()
+        if (
+            _BaseMacOSSender._global_send_lock is None
+            or _BaseMacOSSender._global_send_lock_loop is not loop
+        ):
+            _BaseMacOSSender._global_send_lock = asyncio.Lock()
+            _BaseMacOSSender._global_send_lock_loop = loop
+        return _BaseMacOSSender._global_send_lock
+
 
 class PrivateChatSender(_BaseMacOSSender):
     """私聊发送器: 搜索后直接确认联系人第一项，不依赖额外截图权限。"""
@@ -340,8 +353,13 @@ class GroupChatSender(_BaseMacOSSender):
         self._group_search_arrows = macos_cfg.get("group_search_arrows", 2)
 
     def _build_preamble_lines(self, receiver: str) -> list[str]:
-        py_bin = self._escape(str(Path(__file__).parents[3] / "venv/bin/python"))
+        project_root = Path(__file__).parents[3]
+        screenshot_dir = project_root / "data/tmp/screenshots"
+        group_shot_path = self._escape(str(screenshot_dir / "weix_group_search_ocr.png"))
+        title_shot_path = self._escape(str(screenshot_dir / "weix_current_chat_ocr.png"))
+        py_bin = self._escape(str(project_root / "venv/bin/python"))
         ocr_helper = self._escape(str(Path(__file__).with_name("ocr_helper.swift")))
+        screenshot_helper = self._escape(str(Path(__file__).with_name("screenshot_helper.py")))
         return self._build_focus_preamble_lines() + [
             "on selectGroupSearchResult(targetName)",
             '    tell application "System Events"',
@@ -361,14 +379,19 @@ class GroupChatSender(_BaseMacOSSender):
             "            set searchPos to position of searchWindow",
             "            set searchSize to size of searchWindow",
             '            if item 1 of searchSize < 100 or item 2 of searchSize < 100 then error "群聊搜索截图区域无效"',
-            '            set shotPath to "/tmp/weix_group_search_ocr.png"',
-            "            do shell script \"screencapture -x -R\" & (item 1 of searchPos) & \",\" & (item 2 of searchPos) & \",\" & (item 1 of searchSize) & \",\" & (item 2 of searchSize) & \" \" & quoted form of shotPath",
+            f'            set shotPath to "{group_shot_path}"',
+            f'            set captureOutput to do shell script quoted form of "{py_bin}" & " " & quoted form of "{screenshot_helper}" & " " & quoted form of shotPath & " " & (item 1 of searchPos) & " " & (item 2 of searchPos) & " " & (item 1 of searchSize) & " " & (item 2 of searchSize)',
             f'            set ocrOutput to do shell script "swift {ocr_helper} " & quoted form of shotPath & " " & quoted form of targetName & " --prefer-group-result --require-exact"',
             '            if ocrOutput is "not_found" then error "未找到群聊搜索结果: " & targetName',
             "            set AppleScript's text item delimiters to \",\"",
+            "            set captureParts to text items of captureOutput",
+            "            set captureX to item 1 of captureParts as real",
+            "            set captureY to item 2 of captureParts as real",
+            "            set captureW to item 3 of captureParts as real",
+            "            set captureH to item 4 of captureParts as real",
             "            set ocrParts to text items of ocrOutput",
-            "            set clickX to ((item 1 of searchPos) + ((item 1 of ocrParts as real) * (item 1 of searchSize))) as integer",
-            "            set clickY to ((item 2 of searchPos) + ((item 2 of ocrParts as real) * (item 2 of searchSize))) as integer",
+            "            set clickX to (captureX + ((item 1 of ocrParts as real) * captureW)) as integer",
+            "            set clickY to (captureY + ((item 2 of ocrParts as real) * captureH)) as integer",
             "            set AppleScript's text item delimiters to \"\"",
             "            set pyScript to \"import pyautogui, time; pyautogui.click(\" & clickX & \", \" & clickY & \"); time.sleep(0.2)\"",
             f'            do shell script quoted form of "{py_bin}" & " -c " & quoted form of pyScript',
@@ -380,8 +403,23 @@ class GroupChatSender(_BaseMacOSSender):
             "on verifyCurrentChatTitle(targetName)",
             '    tell application "System Events"',
             '        tell process "WeChat"',
-            '            set shotPath to "/tmp/weix_current_chat_ocr.png"',
-            '            do shell script "screencapture -x " & quoted form of shotPath',
+            "            set verifyWindow to window 1",
+            "            set bestArea to 0",
+            "            repeat with candidateWindow in windows",
+            "                try",
+            "                    set candidateSize to size of candidateWindow",
+            "                    set candidateArea to (item 1 of candidateSize) * (item 2 of candidateSize)",
+            "                    if candidateArea > bestArea then",
+            "                        set bestArea to candidateArea",
+            "                        set verifyWindow to candidateWindow",
+            "                    end if",
+            "                end try",
+            "            end repeat",
+            "            set verifyPos to position of verifyWindow",
+            "            set verifySize to size of verifyWindow",
+            '            if item 1 of verifySize < 100 or item 2 of verifySize < 100 then error "群聊标题截图区域无效"',
+            f'            set shotPath to "{title_shot_path}"',
+            f'            do shell script quoted form of "{py_bin}" & " " & quoted form of "{screenshot_helper}" & " " & quoted form of shotPath & " " & (item 1 of verifyPos) & " " & (item 2 of verifyPos) & " " & (item 1 of verifySize) & " " & (item 2 of verifySize)',
             f'            set ocrOutput to do shell script "swift {ocr_helper} " & quoted form of shotPath & " " & quoted form of targetName & " --verify-chat-title --require-exact"',
             '            if ocrOutput is "not_found" then error "当前聊天不是目标群，拒绝发送: " & targetName',
             "        end tell",

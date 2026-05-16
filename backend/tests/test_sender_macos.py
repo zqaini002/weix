@@ -206,7 +206,7 @@ class TestGroupChatFullSearch:
         assert "selectGroupSearchResult" in script
         assert "贵州铜仁市129办公室工作群" in script
         assert "--prefer-group-result" in script
-        assert "screencapture -x -R" in script
+        assert "screenshot_helper.py" in script
         assert "pyautogui.click" in script
 
     def test_group_search_selection_requires_exact_match(self, group_sender):
@@ -217,17 +217,19 @@ class TestGroupChatFullSearch:
         )
         assert "--prefer-group-result --require-exact" in script
 
-    def test_group_search_screenshot_uses_largest_window_and_valid_rect(self, group_sender):
-        """群聊 OCR 截图必须使用有效窗口矩形，避免 create image from rect 失败。"""
+    def test_group_search_screenshot_uses_pyautogui_window_crop(self, group_sender):
+        """群聊 OCR 应用 pyautogui 截整屏后裁剪窗口，避免 screencapture -R 失败。"""
         script = group_sender._build_script(
             "测试消息", "贵州铜仁市129办公室工作群",
             skip_search=False,
         )
         group_func = script.split("on verifyCurrentChatTitle")[0]
-        assert "set searchWindow to window 1" in group_func
-        assert "repeat with candidateWindow in windows" in group_func
+        assert "screenshot_helper.py" in group_func
         assert "set searchSize to size of searchWindow" in group_func
-        assert "if item 1 of searchSize < 100 or item 2 of searchSize < 100" in group_func
+        assert "set captureOutput to do shell script" in group_func
+        assert "screencapture -x -R" not in group_func
+        assert "set clickX to (captureX + ((item 1 of ocrParts as real) * captureW))" in group_func
+        assert "set clickY to (captureY + ((item 2 of ocrParts as real) * captureH))" in group_func
 
     def test_group_search_verifies_current_chat_before_sending(self, group_sender):
         """发送前必须校验当前聊天标题，避免发到搜一搜或其他群。"""
@@ -242,8 +244,8 @@ class TestGroupChatFullSearch:
         paste_index = script.index("key code 9 using command down")
         assert search_index < verify_index < paste_index
 
-    def test_group_title_verification_uses_fullscreen_capture(self, group_sender):
-        """标题校验不应依赖窗口 rect 截图，避免窗口状态变化导致 rect 无效。"""
+    def test_group_title_verification_uses_pyautogui_capture(self, group_sender):
+        """标题校验也应避开 screencapture，复用 pyautogui 窗口裁剪截图。"""
         script = group_sender._build_script(
             "测试消息", "贵州铜仁市129办公室工作群",
             skip_search=False,
@@ -251,8 +253,20 @@ class TestGroupChatFullSearch:
         verify_func = script.split("on verifyCurrentChatTitle")[1].split(
             "end verifyCurrentChatTitle"
         )[0]
-        assert 'screencapture -x "' in verify_func
-        assert "screencapture -x -R" not in verify_func
+        assert "screenshot_helper.py" in verify_func
+        assert "set verifySize to size of verifyWindow" in verify_func
+        assert "screencapture" not in verify_func
+
+    def test_group_screenshots_are_stored_in_project_data_dir(self, group_sender):
+        """OCR 临时截图应放在项目内 data/tmp/screenshots，不写入系统 /tmp。"""
+        script = group_sender._build_script(
+            "测试消息", "贵州铜仁市129办公室工作群",
+            skip_search=False,
+        )
+        assert "data/tmp/screenshots/weix_group_search_ocr.png" in script
+        assert "data/tmp/screenshots/weix_current_chat_ocr.png" in script
+        assert "/tmp/weix_group_search_ocr.png" not in script
+        assert "/tmp/weix_current_chat_ocr.png" not in script
 
     def test_group_title_verification_requires_exact_match(self, group_sender):
         """群聊标题校验必须使用精确匹配，避免相似前缀群名误放行。"""
@@ -339,6 +353,38 @@ class TestParameterPassing:
         assert "selectGroupSearchResult" not in script_private
         assert "verifyCurrentChatTitle" not in script_private
         assert "key code 125" not in script_private
+
+    @pytest.mark.asyncio
+    async def test_private_and_group_senders_share_ui_lock(self, private_sender, group_sender):
+        """私聊和群聊操作同一个微信 UI，发送必须全局串行。"""
+        import asyncio
+
+        events = []
+
+        async def private_run(script, operation):
+            events.append("private:start")
+            await asyncio.sleep(0.01)
+            events.append("private:end")
+            return True
+
+        async def group_run(script, operation):
+            events.append("group:start")
+            await asyncio.sleep(0.01)
+            events.append("group:end")
+            return True
+
+        private_sender._run = private_run
+        group_sender._run = group_run
+
+        await asyncio.gather(
+            private_sender.send_text("p", "小号"),
+            group_sender.send_text("g", "测试群"),
+        )
+
+        assert events in (
+            ["private:start", "private:end", "group:start", "group:end"],
+            ["group:start", "group:end", "private:start", "private:end"],
+        )
 
 
 # ================================================================
