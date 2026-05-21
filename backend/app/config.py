@@ -15,6 +15,7 @@ class Config(BaseSettings):
     wechat: dict[str, Any] = {}
     wcf: dict[str, Any] = {}
     macos_sender: dict[str, Any] = {}
+    windows_sender: dict[str, Any] = {}
     ai: dict[str, Any] = {}
     auto_reply: dict[str, Any] = {}
     templates: list[dict[str, Any]] = []

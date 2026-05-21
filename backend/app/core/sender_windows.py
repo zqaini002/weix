@@ -1,45 +1,55 @@
 """Windows 平台 WeChat 消息发送器。
 
-通过 httpx 异步 HTTP 客户端调用 WeChatFerry (WCF) HTTP API，
-实现消息发送功能。
+通过 pyautogui 模拟键盘鼠标操作微信 GUI，与 macOS AppleScript 方案对应。
+支持私聊/群聊、免搜索缓存、全局锁串行化、发送后停靠。
 """
 
 import asyncio
 import logging
-import os
-from typing import Optional
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
-import httpx
+import pyautogui
+import pyperclip
 
 from app.core.base import BaseMessageSender
 from app.config import get_config
 
 logger = logging.getLogger(__name__)
 
-# WCF API 端点
-ENDPOINT_SEND_TXT = "/wcf/send_txt"
-ENDPOINT_SEND_IMG = "/wcf/send_img"
-ENDPOINT_IS_LOGIN = "/wcf/is_login"
-ENDPOINT_GET_CONTACTS = "/wcf/get_contacts"
-ENDPOINT_GET_INFO = "/wcf/get_self_info"
+# 微信窗口标题（中文/英文）
+WECHAT_WINDOW_TITLES = ["微信", "WeChat"]
+
+# 单线程 executor，保证 GUI 操作严格串行
+_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wx-gui")
 
 
 class WindowsSender(BaseMessageSender):
     """Windows 平台消息发送器。
 
-    通过 WeChatFerry HTTP API 控制微信客户端发送消息。
-    支持自动重试和错误处理。
+    通过 pyautogui 模拟键盘鼠标操作微信 GUI：
+      - 完整搜索：激活微信 → Ctrl+F 搜索 → 粘贴名称 → Enter 确认 → 粘贴消息 → Enter 发送
+      - 免搜索：同接收者 + 在 TTL 内 → 直接粘贴消息发送
+      - 发送后停靠：切换到固定私聊，避免下一条消息搜索串扰
     """
 
-    def __init__(self, max_retries: int = 3):
-        config = get_config()
-        wcf_cfg = config.wcf if hasattr(config, "wcf") else {}
+    # 全局串行锁，确保单线程操作微信 GUI
+    _gui_lock = threading.Lock()
+    _global_last_activity: float = 0.0
 
-        self._host = wcf_cfg.get("host", "127.0.0.1")
-        self._port = wcf_cfg.get("port", 10010)
-        self._base_url = f"http://{self._host}:{self._port}"
-        self._max_retries = max_retries
-        self._client: Optional[httpx.AsyncClient] = None
+    def __init__(self):
+        config = get_config()
+        win_cfg = config.windows_sender if hasattr(config, "windows_sender") else {}
+        self._type_delay = win_cfg.get("type_delay", 0.3)
+        self._window_activate_delay = win_cfg.get("window_activate_delay", 0.5)
+        self._search_result_delay = win_cfg.get("search_result_delay", 2.0)
+        self._skip_search_ttl = win_cfg.get("skip_search_ttl", 60)
+        self._click_x_ratio = win_cfg.get("click_x_ratio", 0.5)
+        self._click_y_ratio = win_cfg.get("click_y_ratio", 0.75)
+
+        self._last_receiver = ""
+        self._last_send_time: float = 0.0
 
     # --- 公共接口 ---
 
@@ -47,7 +57,6 @@ class WindowsSender(BaseMessageSender):
         self,
         msg: str,
         receiver: str,
-        aters: str = "",
         force_skip: bool = False,
         is_group: bool = False,
     ) -> bool:
@@ -55,10 +64,9 @@ class WindowsSender(BaseMessageSender):
 
         Args:
             msg: 消息内容。
-            receiver: 接收者 wxid 或群聊 id。
-            aters: 需要 @ 的用户 wxid，多个以逗号分隔。
-            force_skip: 兼容 macOS 接口，Windows 下忽略。
-            is_group: 是否为群聊，用于自动设置 aters。
+            receiver: 接收者名称（用于搜索）。
+            force_skip: 强制跳过搜索（macOS 兼容参数）。
+            is_group: 是否为群聊（群聊始终完整搜索）。
 
         Returns:
             True 表示发送成功。
@@ -67,202 +75,220 @@ class WindowsSender(BaseMessageSender):
             logger.error("消息内容或接收者为空")
             return False
 
-        # 群聊场景下，ats 参数为空时自动 @ 所有人
-        actual_aters = aters
-        if is_group and not actual_aters:
-            actual_aters = "notify@all"
-
-        payload = {
-            "msg": msg,
-            "receiver": receiver,
-            "aters": actual_aters,
-        }
-
-        return await self._post_with_retry(
-            ENDPOINT_SEND_TXT, payload, "发送文本消息"
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _executor,
+            self._send_text_sync,
+            msg,
+            receiver,
+            force_skip,
+            is_group,
         )
-
-    async def open_chat(self, receiver: str) -> bool:
-        """打开指定聊天（Windows WCF 无需此操作，始终返回 True）。"""
-        logger.debug(f"Windows 平台无需手动打开聊天: {receiver}")
-        return True
-
-    def reset_search_state(self) -> None:
-        """重置搜索状态（Windows WCF 无需此操作）。"""
-        pass
 
     async def send_image(self, path: str, receiver: str) -> bool:
-        """发送图片消息。
-
-        Args:
-            path: 图片文件路径。
-            receiver: 接收者 wxid 或群聊 id。
-
-        Returns:
-            True 表示发送成功。
-        """
-        if not os.path.exists(path):
-            logger.error(f"图片文件不存在: {path}")
-            return False
-
-        if not receiver:
-            logger.error("接收者为空")
-            return False
-
-        payload = {
-            "path": path,
-            "receiver": receiver,
-        }
-
-        return await self._post_with_retry(
-            ENDPOINT_SEND_IMG, payload, "发送图片消息"
-        )
+        logger.warning("Windows 平台暂不支持 send_image")
+        return False
 
     async def is_wechat_running(self) -> bool:
-        """检查微信是否在线（已登录）。
+        """检查微信进程是否在运行。"""
+        return self._find_wechat_window() is not None
 
-        Returns:
-            True 表示微信已登录且就绪。
-        """
-        try:
-            client = await self._get_client()
-            response = await client.post(
-                f"{self._base_url}{ENDPOINT_IS_LOGIN}",
-                timeout=httpx.Timeout(5.0),
-            )
-            if response.status_code == 200:
-                data = response.json()
-                is_login = data.get("status") == 1 or data.get("data", {}).get(
-                    "status"
-                ) == 1
-                return bool(is_login)
+    async def open_chat(self, receiver: str) -> bool:
+        """打开指定聊天（用于发送后停靠）。"""
+        if not receiver:
             return False
-        except httpx.ConnectError:
-            logger.debug("WCF 服务未连接")
-            return False
-        except Exception as exc:
-            logger.error(f"检查微信状态失败: {exc}")
-            return False
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_executor, self._open_chat_sync, receiver)
 
-    async def get_contacts(self) -> list[dict]:
-        """获取联系人列表 (通过 WCF API)。
+    def reset_search_state(self) -> None:
+        """清空免搜索状态。"""
+        self._last_receiver = ""
+        self._last_send_time = 0.0
 
-        Returns:
-            联系人字典列表。
-        """
-        try:
-            client = await self._get_client()
-            response = await client.post(
-                f"{self._base_url}{ENDPOINT_GET_CONTACTS}",
-                timeout=httpx.Timeout(10.0),
-            )
-            if response.status_code == 200:
-                data = response.json()
-                contacts = data.get("data", data.get("contacts", []))
-                if isinstance(contacts, list):
-                    return contacts
-            return []
-        except Exception as exc:
-            logger.error(f"获取联系人列表失败: {exc}")
-            return []
+    # --- 同步核心逻辑 ---
 
-    async def get_self_info(self) -> dict:
-        """获取自己的微信信息。
-
-        Returns:
-            包含 wxid, name 等字段的字典。
-        """
-        try:
-            client = await self._get_client()
-            response = await client.post(
-                f"{self._base_url}{ENDPOINT_GET_INFO}",
-                timeout=httpx.Timeout(5.0),
-            )
-            if response.status_code == 200:
-                data = response.json()
-                return data.get("data", {})
-            return {}
-        except Exception as exc:
-            logger.error(f"获取自身信息失败: {exc}")
-            return {}
-
-    async def close(self) -> None:
-        """关闭 HTTP 客户端。"""
-        if self._client:
-            await self._client.aclose()
-            self._client = None
-
-    # --- 内部方法 ---
-
-    async def _get_client(self) -> httpx.AsyncClient:
-        """获取或创建 httpx 异步客户端。"""
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                timeout=httpx.Timeout(30.0),
-                limits=httpx.Limits(max_keepalive_connections=5),
-            )
-        return self._client
-
-    async def _post_with_retry(
-        self, endpoint: str, payload: dict, operation: str
+    def _send_text_sync(
+        self,
+        msg: str,
+        receiver: str,
+        force_skip: bool,
+        is_group: bool,
     ) -> bool:
-        """带重试的 HTTP POST 请求。
-
-        Args:
-            endpoint: API 端点。
-            payload: 请求体。
-            operation: 操作描述 (用于日志)。
-
-        Returns:
-            True 表示请求成功。
-        """
-        client = await self._get_client()
-        url = f"{self._base_url}{endpoint}"
-
-        for attempt in range(1, self._max_retries + 1):
+        """同步消息发送，在全局锁内执行。"""
+        with self._gui_lock:
             try:
-                logger.debug(
-                    f"{operation} (尝试 {attempt}/{self._max_retries}): "
-                    f"receiver={payload.get('receiver', '')[:20]}..."
-                )
+                # 检查微信是否在运行
+                if self._find_wechat_window() is None:
+                    logger.error("未找到微信窗口")
+                    return False
 
-                response = await client.post(url, json=payload)
+                # 判断是否跳过搜索
+                skip_search = self._should_skip_search(receiver, force_skip, is_group)
 
-                if response.status_code == 200:
-                    data = response.json()
-                    status = data.get("status", -1)
-                    if status == 0 or status == 1:
-                        logger.info(f"{operation} 成功")
-                        return True
-                    else:
-                        logger.warning(
-                            f"{operation} 返回非成功状态: status={status}, "
-                            f"message={data.get('message', '')}"
-                        )
-                        # 某些错误不需要重试
-                        if status in (-1, -2):  # 参数错误
-                            return False
+                if not skip_search:
+                    self._full_search(receiver)
                 else:
-                    logger.warning(
-                        f"{operation} HTTP {response.status_code}: "
-                        f"{response.text[:200]}"
-                    )
+                    logger.info("免搜索发送 | receiver=%s", receiver)
 
-            except httpx.TimeoutException:
-                logger.warning(
-                    f"{operation} 超时 (尝试 {attempt}/{self._max_retries})"
-                )
-            except httpx.ConnectError:
-                logger.warning(
-                    f"{operation} 连接失败 - WCF 服务可能未启动"
-                )
+                # 聚焦输入框 + 粘贴消息 + 发送
+                self._activate_wechat()
+                self._focus_message_input()
+                self._clear_and_paste(msg)
+                self._press_enter()
+
+                # 更新状态
+                self._last_receiver = receiver
+                self._last_send_time = time.monotonic()
+                WindowsSender._global_last_activity = self._last_send_time
+
+                logger.info("消息发送成功 | receiver=%s", receiver)
+                return True
+
             except Exception as exc:
-                logger.error(f"{operation} 异常: {exc}")
+                logger.error("消息发送失败: %s", exc)
 
-            if attempt < self._max_retries:
-                wait_time = 2 ** attempt  # 指数退避: 2s, 4s, 8s
-                logger.debug(f"等待 {wait_time}s 后重试...")
-                await asyncio.sleep(wait_time)
+                # 免搜索失败时重试完整搜索
+                if skip_search and not force_skip:
+                    logger.info("免搜索失败，重试完整搜索")
+                    self.reset_search_state()
+                    return self._send_text_sync(msg, receiver, force_skip=False, is_group=is_group)
 
-        logger.error(f"{operation} 失败，已达最大重试次数")
-        return False
+                return False
+
+    def _open_chat_sync(self, receiver: str) -> bool:
+        """同步打开聊天。"""
+        with self._gui_lock:
+            try:
+                self._full_search(receiver)
+                self.reset_search_state()
+                return True
+            except Exception as exc:
+                logger.error("打开聊天失败: %s", exc)
+                return False
+
+    # --- GUI 操作原语 ---
+
+    @staticmethod
+    def _find_wechat_window():
+        """查找微信主窗口。"""
+        try:
+            import pygetwindow as gw
+            for title in WECHAT_WINDOW_TITLES:
+                windows = gw.getWindowsWithTitle(title)
+                if windows:
+                    return windows[0]
+            return None
+        except ImportError:
+            # 回退：用 pyautogui 的窗口列表
+            for title in WECHAT_WINDOW_TITLES:
+                wins = pyautogui.getWindowsWithTitle(title)
+                if wins:
+                    return wins[0]
+            return None
+
+    def _activate_wechat(self) -> None:
+        """激活微信窗口。"""
+        win = self._find_wechat_window()
+        if win is None:
+            raise RuntimeError("未找到微信窗口")
+
+        try:
+            win.activate()
+        except Exception:
+            # pygetwindow.activate 某些版本不可靠，用点击任务栏兜底
+            pass
+
+        time.sleep(self._window_activate_delay)
+
+    def _full_search(self, receiver: str) -> None:
+        """完整搜索流程：激活 → Ctrl+F → 粘贴 → Enter → 等待加载。"""
+        self._activate_wechat()
+
+        # 清除任何已有的搜索
+        pyautogui.press("escape")
+        time.sleep(0.15)
+
+        # Ctrl+F 打开搜索
+        pyautogui.hotkey("ctrl", "f")
+        time.sleep(0.5)
+
+        # 全选旧搜索词 + 粘贴新名称
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.1)
+        pyperclip.copy(receiver)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(self._search_result_delay)
+
+        # Enter 确认第一个搜索结果
+        pyautogui.press("enter")
+        time.sleep(self._search_result_delay)
+
+        # 关闭搜索框
+        pyautogui.press("escape")
+        time.sleep(0.15)
+
+        logger.debug("完整搜索完成 | receiver=%s", receiver)
+
+    def _focus_message_input(self) -> None:
+        """点击消息输入区域，确保光标在输入框内。"""
+        win = self._find_wechat_window()
+        if win is None:
+            return
+
+        try:
+            x = win.left + int(win.width * self._click_x_ratio)
+            y = win.top + int(win.height * self._click_y_ratio)
+        except AttributeError:
+            # pyautogui 回退
+            x, y = pyautogui.size()
+            x = int(x * self._click_x_ratio)
+            y = int(y * self._click_y_ratio)
+
+        pyautogui.click(x, y)
+        time.sleep(0.15)
+        pyautogui.click(x, y)  # 双击确保焦点
+        time.sleep(0.1)
+
+    @staticmethod
+    def _clear_and_paste(msg: str) -> None:
+        """清空输入框并粘贴消息。"""
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.1)
+        pyperclip.copy(msg)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.3)
+
+    @staticmethod
+    def _press_enter() -> None:
+        """按 Enter 发送消息。"""
+        time.sleep(0.15)
+        pyautogui.press("enter")
+        time.sleep(0.3)
+
+    # --- 内部判断 ---
+
+    def _should_skip_search(
+        self,
+        receiver: str,
+        force_skip: bool,
+        is_group: bool,
+    ) -> bool:
+        """判断是否可以跳过搜索直接发送。"""
+        # 群聊始终完整搜索
+        if is_group:
+            return False
+
+        # 强制跳过
+        if force_skip:
+            return True
+
+        # 同接收者且在 TTL 内
+        if receiver != self._last_receiver:
+            return False
+
+        other_activity = self._global_last_activity > self._last_send_time
+        if other_activity:
+            return False
+
+        elapsed = time.monotonic() - self._last_send_time
+        return elapsed <= self._skip_search_ttl

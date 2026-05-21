@@ -81,6 +81,13 @@ macos_sender:
   search_result_delay: 5.0
   type_delay: 0.3
   window_activate_delay: 0.5
+windows_sender:
+  click_x_ratio: 0.5
+  click_y_ratio: 0.75
+  search_result_delay: 2.0
+  skip_search_ttl: 60
+  type_delay: 0.3
+  window_activate_delay: 0.5
 monitor:
   poll_interval: 2
 platform: auto

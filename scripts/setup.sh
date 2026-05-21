@@ -54,6 +54,31 @@ section "安装后端依赖"
 pip install -r backend/requirements.txt --ignore-requires-python 2>&1 | tail -5
 info "后端依赖安装完成"
 
+# 预下载 AI 模型
+section "预下载 AI 模型 (~1.4GB)"
+if [[ -f "scripts/download_models.py" ]]; then
+    info "正在下载 embedding 模型、tiktoken 编码器等..."
+    info "首次下载约需 5-15 分钟（取决于网络），请耐心等待"
+    python scripts/download_models.py || warn "模型预下载未完全成功，首次启动时会自动重试"
+else
+    warn "未找到 scripts/download_models.py，跳过模型预下载"
+    warn "首次启动时将自动下载模型（可能需要几分钟）"
+fi
+
+# 引导 .env 配置
+section "环境变量配置"
+if [[ ! -f ".env" ]]; then
+    if [[ -f ".env.example" ]]; then
+        cp .env.example .env
+        info "已从 .env.example 创建 .env 文件"
+        warn "请编辑 .env 填入你的 DEEPSEEK_API_KEY"
+    else
+        warn "未找到 .env.example，请手动配置环境变量"
+    fi
+else
+    info ".env 文件已存在，跳过"
+fi
+
 # 检查 Node.js
 section "检查 Node.js 环境"
 if ! command -v node &>/dev/null; then
@@ -85,10 +110,11 @@ mkdir -p data
 
 section "初始化完成!"
 echo "下一步:"
-echo "  1. 编辑 config/config.yaml 配置文件"
-echo "  2. 运行 bash scripts/start.sh 启动服务"
+echo "  1. 编辑 .env 填入 DEEPSEEK_API_KEY"
+echo "  2. 编辑 config/config.yaml 调整业务配置"
+echo "  3. 运行 bash scripts/start.sh 启动服务"
 echo ""
 echo "macOS 注意事项:"
-echo "  - 确保已授予终端辅助功能权限"
-echo "  - 密钥提取需要 sudo 权限（一次性）"
-echo "  - 发送消息时微信窗口需在前台"
+echo "  - 确保已授予终端辅助功能权限（系统设置 → 隐私 → 辅助功能）"
+echo "  - 密钥提取首次需 sudo 权限"
+echo "  - 发送消息时微信需保持前台"
