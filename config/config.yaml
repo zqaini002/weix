@@ -3,9 +3,9 @@ admin:
   password: ${ADMIN_PASSWORD:-admin123}
   username: admin
 ai:
-  amap_key: ${AMAP_KEY:-b99385f85bc12ffc5ed25638d72e6460}
+  amap_key: ${AMAP_KEY:-}
   amap_security_key: ${AMAP_SECURITY_KEY:-}
-  api_key: sk-b323b2e20026499980f6c26124a10260
+  api_key: ${DEEPSEEK_API_KEY:-}
   base_url: https://api.deepseek.com
   max_tokens: 2000
   model: deepseek-v4-pro

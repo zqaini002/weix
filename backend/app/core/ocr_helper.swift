@@ -46,6 +46,11 @@ guard let observations = request.results else {
     exit(0)
 }
 
+if observations.isEmpty {
+    print("no_text_found")
+    exit(0)
+}
+
 let imgW = CGFloat(cgImage.width)
 let imgH = CGFloat(cgImage.height)
 
@@ -94,8 +99,11 @@ for obs in observations {
         chatRecordLabelY = midY
     }
 
-    if text.contains(targetText) || isUsefulPartialMatch(text, target: targetText) {
-        matches.append(Match(x: midX, y: midY, text: text, exact: text.contains(targetText)))
+    let cleanText = normalized(text)
+    let cleanTarget = normalized(targetText)
+    let exactMatch = cleanText.contains(cleanTarget)
+    if exactMatch || isUsefulPartialMatch(text, target: targetText) {
+        matches.append(Match(x: midX, y: midY, text: text, exact: exactMatch))
     }
 }
 
@@ -104,7 +112,7 @@ if requireExact {
 }
 
 if verifyChatTitle {
-    let searchPageMarkers = ["AI搜索", "搜索网络结果", "文章", "账号", "朋友圈", "听一听", "新闻"]
+    let searchPageMarkers = ["AI搜索", "搜索网络结果", "文章", "账号", "朋友圈", "听一听"]
     let allText = observations.compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ")
     if searchPageMarkers.contains(where: { allText.contains($0) }) {
         print("not_found")

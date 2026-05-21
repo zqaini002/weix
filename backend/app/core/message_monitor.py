@@ -95,6 +95,7 @@ class MessageMonitor:
         self._last_timestamp: int = 0
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
+        self._stop_event: Optional[asyncio.Event] = None
         self._stats = MonitorStats()
         self._sent_messages: list[tuple[str, str, float]] = []
 
@@ -114,6 +115,7 @@ class MessageMonitor:
             return
 
         self._running = True
+        self._stop_event = asyncio.Event()
         self._last_timestamp = int((time.time() - lookback_seconds) * 1000)
         self._task = asyncio.create_task(self._poll_loop())
         logger.info(
@@ -124,13 +126,15 @@ class MessageMonitor:
     async def stop(self) -> None:
         """停止消息监听。"""
         self._running = False
+        if self._stop_event:
+            self._stop_event.set()
         if self._task:
-            self._task.cancel()
             try:
                 await self._task
             except asyncio.CancelledError:
                 pass
             self._task = None
+        self._stop_event = None
         logger.info("消息监听器已停止")
         self._log_stats()
 
@@ -207,10 +211,20 @@ class MessageMonitor:
                 logger.error(f"轮询异常: {exc}", exc_info=True)
                 self._stats.errors += 1
                 # 出错后等待重试延迟再继续
-                await asyncio.sleep(self._config.retry_delay)
+                await self._sleep_or_stop(self._config.retry_delay)
                 continue
 
-            await asyncio.sleep(self._config.poll_interval)
+            await self._sleep_or_stop(self._config.poll_interval)
+
+    async def _sleep_or_stop(self, delay: float) -> None:
+        """等待下一轮轮询，停止时立即唤醒。"""
+        if self._stop_event is None:
+            await asyncio.sleep(delay)
+            return
+        try:
+            await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+        except asyncio.TimeoutError:
+            pass
 
     async def _poll_once(self) -> list[WeChatMessage]:
         """执行一次轮询查询。

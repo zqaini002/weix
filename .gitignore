@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE & Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# MCP & Dev tools
+.playwright-mcp/
+.spec-workflow/
+
+# Data - temporary files
+data/tmp/
+data/tmp/screenshots/
+
+# Environment
+.env
+.env.local
+.env.*.local
+*.log

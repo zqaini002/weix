@@ -59,8 +59,8 @@ def _preload_embeddings():
 
     def _load():
         try:
-            from app.ai.embeddings import EmbeddingManager
-            em = EmbeddingManager(provider="local")
+            from app.ai.embeddings import get_embedding_manager
+            em = get_embedding_manager(provider="local")
             _ = em.embed_query("warmup")
             logger.info("Embedding 模型预加载完成")
         except Exception as e:
@@ -73,12 +73,12 @@ def _preload_embeddings():
 async def _seed_knowledge():
     """启动时初始化知识库种子数据。"""
     try:
-        from app.ai.embeddings import EmbeddingManager
-        from app.ai.vector_store import VectorStoreManager
+        from app.ai.embeddings import get_embedding_manager
+        from app.ai.vector_store import get_vector_store
         from app.ai.knowledge_seed import seed_knowledge_base
 
-        em = EmbeddingManager()
-        vs = VectorStoreManager()
+        em = get_embedding_manager()
+        vs = get_vector_store()
         count = await seed_knowledge_base(vs, em)
         if count > 0:
             logger.info(f"知识库种子数据初始化完成: {count} 条")
@@ -99,6 +99,10 @@ async def lifespan(app: FastAPI):
     # 预加载 embedding 模型（避免首条消息延迟）
     _preload_embeddings()
 
+    # 启动后台临时文件清理任务
+    from app.core.temp_cleanup import start_temp_cleanup_task
+    cleanup_task = start_temp_cleanup_task()
+
     # 启动自动回复流水线
     pipeline = await _start_auto_reply_pipeline()
 
@@ -107,6 +111,13 @@ async def lifespan(app: FastAPI):
     # 停止流水线
     if pipeline:
         await pipeline.stop()
+
+    # 停止清理任务
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
 
 
 app = FastAPI(title="Weix - WeChat Bot", version="0.1.0", lifespan=lifespan)

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -93,10 +94,12 @@ class EmbeddingManager:
         try:
             from sentence_transformers import SentenceTransformer
 
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
             logger.info(f"Loading local embedding model: {self._model}")
             self._client = SentenceTransformer(
                 self._model,
-                local_files_only=True,  # 跳过 HF 在线校验，模型已在本地缓存
+                local_files_only=False,
             )
             self._dimension = self._client.get_embedding_dimension()
             logger.info(
@@ -189,3 +192,32 @@ class EmbeddingManager:
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """批量转向量的别名方法。"""
         return self.embed(texts)
+
+    async def embed_query_async(self, text: str) -> list[float]:
+        """embed_query 的异步版本（线程池中执行，避免阻塞事件循环）。"""
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.embed_query, text)
+
+    async def embed_async(self, texts: list[str]) -> list[list[float]]:
+        """embed 的异步版本（线程池中执行）。"""
+        import asyncio
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self.embed, texts)
+
+
+# ------------------------------------------------------------------
+# 全局单例
+# ------------------------------------------------------------------
+
+_embedding_manager_instances: dict[str, EmbeddingManager] = {}
+_em_lock = __import__("threading").Lock()
+
+
+def get_embedding_manager(provider: str = "local") -> EmbeddingManager:
+    """获取按 provider 缓存的全局单例 EmbeddingManager（线程安全）。"""
+    if provider not in _embedding_manager_instances:
+        with _em_lock:
+            if provider not in _embedding_manager_instances:
+                _embedding_manager_instances[provider] = EmbeddingManager(provider=provider)
+    return _embedding_manager_instances[provider]

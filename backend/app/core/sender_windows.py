@@ -44,7 +44,12 @@ class WindowsSender(BaseMessageSender):
     # --- 公共接口 ---
 
     async def send_text(
-        self, msg: str, receiver: str, aters: str = ""
+        self,
+        msg: str,
+        receiver: str,
+        aters: str = "",
+        force_skip: bool = False,
+        is_group: bool = False,
     ) -> bool:
         """发送文本消息。
 
@@ -52,6 +57,8 @@ class WindowsSender(BaseMessageSender):
             msg: 消息内容。
             receiver: 接收者 wxid 或群聊 id。
             aters: 需要 @ 的用户 wxid，多个以逗号分隔。
+            force_skip: 兼容 macOS 接口，Windows 下忽略。
+            is_group: 是否为群聊，用于自动设置 aters。
 
         Returns:
             True 表示发送成功。
@@ -60,15 +67,29 @@ class WindowsSender(BaseMessageSender):
             logger.error("消息内容或接收者为空")
             return False
 
+        # 群聊场景下，ats 参数为空时自动 @ 所有人
+        actual_aters = aters
+        if is_group and not actual_aters:
+            actual_aters = "notify@all"
+
         payload = {
             "msg": msg,
             "receiver": receiver,
-            "aters": aters,
+            "aters": actual_aters,
         }
 
         return await self._post_with_retry(
             ENDPOINT_SEND_TXT, payload, "发送文本消息"
         )
+
+    async def open_chat(self, receiver: str) -> bool:
+        """打开指定聊天（Windows WCF 无需此操作，始终返回 True）。"""
+        logger.debug(f"Windows 平台无需手动打开聊天: {receiver}")
+        return True
+
+    def reset_search_state(self) -> None:
+        """重置搜索状态（Windows WCF 无需此操作）。"""
+        pass
 
     async def send_image(self, path: str, receiver: str) -> bool:
         """发送图片消息。

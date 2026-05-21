@@ -224,12 +224,14 @@ async def test_scenario_3_group_full_search():
     print(script)
 
     # 验证关键元素
-    assert "selectGroupSearchResult" in script, "缺少群聊搜索结果 OCR 选择"
-    assert "--prefer-group-result" in script, "缺少群聊结果优先 OCR 模式"
-    assert "pyautogui.click" in script, "应使用 pyautogui 真实点击群聊结果"
+    assert "verifyCurrentChatTitle" not in script, "群聊发送不应依赖标题截图校验"
+    assert "screenshot_helper.py" not in script, "群聊发送不应生成截图"
+    assert "weix_ocr_helper" not in script, "群聊发送不应依赖 OCR"
+    assert "pyautogui.click" not in script, "群聊搜索结果不应依赖坐标点击"
     assert "key code 125" not in script, "不应再用下箭头，避免触发搜一搜"
+    assert "key code 36" in script, "应使用回车确认第一条群聊结果"
     assert GROUP_TARGET in script, "缺少群名"
-    print("\n✓ 脚本结构验证通过: OCR 定位 + pyautogui 点击 + 群名")
+    print("\n✓ 脚本结构验证通过: 无截图/OCR + 回车确认 + 群名")
 
     print()
     success = await sender.send_text(test_msg, GROUP_TARGET, is_group=True)

@@ -33,7 +33,7 @@ async def login(req: LoginRequest):
     config = get_config()
     admin_cfg = config.admin
     stored_password = admin_cfg.get("password", "")
-    jwt_secret = admin_cfg.get("jwt_secret", "weix-secret-key")
+    jwt_secret = admin_cfg.get("jwt_secret", "")
 
     if req.username != admin_cfg.get("username"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")

@@ -53,15 +53,13 @@ async def list_contacts(
         if not keys:
             error = "尚未提取数据库密钥。请以 sudo 启动后端进行密钥提取"
         else:
-            reader = platform.db_reader
-            if reader is None:
-                from app.core.db_reader_macos import MacOSDBReader
-                from app.core.db_reader_windows import WindowsDBReader
+            from app.core.db_reader_macos import MacOSDBReader
+            from app.core.db_reader_windows import WindowsDBReader
 
-                if platform.is_macos:
-                    reader = MacOSDBReader()
-                else:
-                    reader = WindowsDBReader()
+            if platform.is_macos:
+                reader = MacOSDBReader()
+            else:
+                reader = WindowsDBReader()
 
             # 查找并匹配数据库
             def _find_db_key(target: str) -> tuple[str | None, str | None]:

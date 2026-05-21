@@ -58,14 +58,14 @@ class RAGPipeline:
                 "duplicate_warning": str,      # AI 自省提醒
             }
         """
-        query_embedding = self._embeddings.embed_query(user_message)
+        query_embedding = await self._embeddings.embed_query_async(user_message)
 
         # 1. 检索知识库
-        knowledge_docs = self._retrieve_knowledge(query_embedding)
+        knowledge_docs = await self._retrieve_knowledge(query_embedding)
 
-        # 2. 检索相似历史对话
-        similar_convos = self._retrieve_similar_conversations(
-            query_embedding, exclude_session=session_id
+        # 2. 检索当前会话内的相似历史对话，避免私聊之间串记忆和人称归属混乱。
+        similar_convos = await self._retrieve_similar_conversations(
+            query_embedding, session_id=session_id
         )
 
         # 3. AI 自省去重提醒
@@ -77,10 +77,10 @@ class RAGPipeline:
             "duplicate_warning": duplicate_warning,
         }
 
-    def _retrieve_knowledge(self, query_embedding: list[float]) -> str:
+    async def _retrieve_knowledge(self, query_embedding: list[float]) -> str:
         """检索知识库并格式化为文本。"""
         try:
-            docs = self._vector_store.search_knowledge(query_embedding, k=3)
+            docs = await self._vector_store.search_knowledge_async(query_embedding, k=3)
             if not docs:
                 return "（暂无相关知识库内容）"
 
@@ -97,15 +97,19 @@ class RAGPipeline:
             logger.warning(f"Knowledge retrieval failed: {exc}")
             return "（知识库检索暂时不可用）"
 
-    def _retrieve_similar_conversations(
+    async def _retrieve_similar_conversations(
         self,
         query_embedding: list[float],
+        session_id: str = "",
         exclude_session: str = "",
     ) -> str:
         """检索相似历史对话摘要。"""
         try:
-            summaries = self._vector_store.search_similar_conversations(
-                query_embedding, k=3, exclude_session=exclude_session
+            summaries = await self._vector_store.search_similar_conversations_async(
+                query_embedding,
+                k=3,
+                session_id=session_id,
+                exclude_session=exclude_session,
             )
             if not summaries:
                 return "（暂无相关历史对话）"
@@ -139,7 +143,7 @@ class RAGPipeline:
     # 便捷方法
     # ------------------------------------------------------------------
 
-    def check_duplicate_and_remember(
+    async def check_duplicate_and_remember(
         self,
         session_id: str,
         response: str,
@@ -154,16 +158,18 @@ class RAGPipeline:
             True 表示检测到重复。
         """
         try:
-            embedding = self._embeddings.embed_query(response)
-            is_dup, similar = self._vector_store.check_duplicate(embedding)
+            embedding = await self._embeddings.embed_query_async(response)
+            is_dup, similar = await self._vector_store.check_duplicate_async(embedding)
             if not is_dup:
-                self._vector_store.remember_response(session_id, response, embedding)
+                await self._vector_store.remember_response_async(
+                    session_id, response, embedding
+                )
             return is_dup
         except Exception as exc:
             logger.warning(f"Duplicate check failed: {exc}")
             return False
 
-    def remember_conversation(
+    async def remember_conversation(
         self,
         session_id: str,
         summary: str,
@@ -175,7 +181,9 @@ class RAGPipeline:
             summary: 摘要文本。
         """
         try:
-            embedding = self._embeddings.embed_query(summary)
-            self._vector_store.add_conversation_summary(session_id, summary, embedding)
+            embedding = await self._embeddings.embed_query_async(summary)
+            await self._vector_store.add_conversation_summary_async(
+                session_id, summary, embedding
+            )
         except Exception as exc:
             logger.warning(f"Failed to store conversation summary: {exc}")

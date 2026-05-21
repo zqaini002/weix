@@ -117,6 +117,37 @@ class MacOSDBReader(BaseDBReader):
             logger.error(f"打开数据库失败: {exc}")
             return False
 
+    def is_message_db(self) -> bool:
+        """验证当前打开的数据库是否包含消息表（Msg_%）。
+
+        用于防止误打开 contact.db 等不含消息的非消息数据库。
+        """
+        if self._sqlite_conn is None:
+            return False
+        try:
+            cursor = self._sqlite_conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name LIKE 'Msg_%'"
+            )
+            count = cursor.fetchone()[0]
+            return count > 0
+        except Exception:
+            return False
+
+    def is_contact_db(self) -> bool:
+        """验证当前打开的数据库是否包含联系人表。"""
+        if self._sqlite_conn is None:
+            return False
+        try:
+            cursor = self._sqlite_conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name IN ('contact', 'chat_room')"
+            )
+            count = cursor.fetchone()[0]
+            return count >= 1
+        except Exception:
+            return False
+
     # 最小刷新间隔（秒），避免频繁 WAL checkpoint 导致反复全量解密
     _MIN_REFRESH_INTERVAL = 15.0
 
@@ -175,7 +206,7 @@ class MacOSDBReader(BaseDBReader):
         self._msg_table_cache = None
         logger.debug("解密副本刷新成功")
 
-        # 延迟清理旧副本
+        # 延迟清理旧副本（含 WAL/SHM/journal）
         if old_conn:
             try:
                 old_conn.close()
@@ -186,6 +217,13 @@ class MacOSDBReader(BaseDBReader):
                 os.unlink(old_path)
             except Exception:
                 pass
+            for suffix in ("-wal", "-shm", "-journal"):
+                aux = old_path + suffix
+                if os.path.exists(aux):
+                    try:
+                        os.unlink(aux)
+                    except Exception:
+                        pass
 
     def query_messages_since(self, timestamp: int) -> list[WeChatMessage]:
         """查询指定时间戳之后的消息。
@@ -241,6 +279,14 @@ class MacOSDBReader(BaseDBReader):
                     logger.info(
                         f"消息表缓存已构建: {len(self._msg_table_cache)} 个会话表"
                     )
+                    if not self._msg_table_cache:
+                        all_tables = self._sqlite_conn.execute(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        ).fetchall()
+                        logger.warning(
+                            f"数据库中无 Msg_% 表，实际表: "
+                            f"{[r[0] for r in all_tables[:20]]}"
+                        )
 
                 messages: list[WeChatMessage] = []
                 scanned = 0
@@ -584,6 +630,14 @@ class MacOSDBReader(BaseDBReader):
                     logger.debug("临时解密文件已清理")
                 except Exception as exc:
                     logger.debug(f"清理临时文件异常: {exc}")
+                # 清理关联的 WAL/SHM/journal 文件
+                for suffix in ("-wal", "-shm", "-journal"):
+                    aux = self._decrypted_path + suffix
+                    if os.path.exists(aux):
+                        try:
+                            os.unlink(aux)
+                        except Exception:
+                            pass
                 self._decrypted_path = ""
 
     def __del__(self) -> None:
@@ -664,24 +718,44 @@ class MacOSDBReader(BaseDBReader):
         )
 
     @classmethod
-    def _cleanup_stale_temps(cls) -> None:
-        """删除超过 10 分钟的旧临时文件。"""
+    def cleanup_temp_files(cls, stale_seconds: int = 600) -> int:
+        """清理过期的解密临时文件及其 WAL/SHM/journal 辅助文件。
+
+        Returns:
+            已删除的文件数量。
+        """
         tmp_dir = cls._get_temp_dir()
         now = time.time()
-        stale_seconds = 600
+        removed = 0
         try:
             for name in os.listdir(tmp_dir):
-                if not name.startswith("weix_decrypted_") or not name.endswith(".db"):
+                if not name.startswith("weix_decrypted_"):
+                    continue
+                # 匹配 .db, .db-wal, .db-shm, .db-journal
+                if not (
+                    name.endswith(".db")
+                    or name.endswith(".db-wal")
+                    or name.endswith(".db-shm")
+                    or name.endswith(".db-journal")
+                ):
                     continue
                 fpath = os.path.join(tmp_dir, name)
                 try:
                     if now - os.path.getmtime(fpath) > stale_seconds:
                         os.unlink(fpath)
-                        logger.debug(f"清理旧临时文件: {name}")
+                        removed += 1
                 except OSError:
                     pass
         except OSError:
             pass
+        if removed:
+            logger.info(f"已清理 {removed} 个临时解密文件")
+        return removed
+
+    @classmethod
+    def _cleanup_stale_temps(cls) -> None:
+        """删除超过 10 分钟的旧临时文件（委托给 cleanup_temp_files）。"""
+        cls.cleanup_temp_files(stale_seconds=600)
 
     def _decrypt_to_temp(self) -> str:
         """将加密数据库解密到项目本地临时文件。

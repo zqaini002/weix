@@ -1,0 +1,140 @@
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Build Backend (PyInstaller)
+        run: |
+          python -m venv venv
+          source venv/bin/activate
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+          pyinstaller \
+            --name=Weix \
+            --onedir \
+            --console \
+            --clean \
+            --noconfirm \
+            --paths=backend \
+            --add-data "config:config" \
+            --add-data "data:data" \
+            --add-data "frontend/dist:frontend_dist" \
+            --add-data "backend/app/core/mach_helper:app/core" \
+            --hidden-import=uvicorn.logging \
+            --hidden-import=uvicorn.loops.auto \
+            --hidden-import=uvicorn.protocols.http.auto \
+            --hidden-import=sqlalchemy.ext.asyncio \
+            --hidden-import=aiosqlite \
+            --hidden-import=chromadb \
+            --hidden-import=sentence_transformers \
+            --hidden-import=tiktoken \
+            --hidden-import=langchain \
+            --hidden-import=jieba \
+            --hidden-import=passlib.handlers.bcrypt \
+            --hidden-import=pycryptodome \
+            --collect-all chromadb \
+            --collect-all sentence_transformers \
+            backend/app/main.py
+
+      - name: Package (DMG)
+        run: |
+          mkdir -p dist/Weix.app/Contents/MacOS
+          cp -r dist/Weix/* dist/Weix.app/Contents/MacOS/
+          cat > dist/Weix.app/Contents/MacOS/start_weix.sh << 'EOF'
+          #!/bin/bash
+          DIR="$(cd "$(dirname "$0")" && pwd)"
+          "$DIR/Weix" &
+          echo "Weix: http://localhost:8000"
+          wait
+          EOF
+          chmod +x dist/Weix.app/Contents/MacOS/start_weix.sh
+          hdiutil create -volname Weix -srcfolder dist/Weix.app -ov -format UDZO dist/Weix-macOS.dmg
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Weix-macOS
+          path: dist/Weix-macOS.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Build Frontend
+        run: |
+          cd frontend
+          npm ci
+          npm run build
+
+      - name: Build Backend (PyInstaller)
+        run: |
+          python -m venv venv
+          venv\Scripts\activate
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+          pyinstaller --name=Weix --onedir --console --clean --noconfirm --paths=backend --add-data "config;config" --add-data "data;data" --add-data "frontend/dist;frontend_dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=sqlalchemy.ext.asyncio --hidden-import=aiosqlite --hidden-import=chromadb --hidden-import=sentence_transformers --hidden-import=tiktoken --hidden-import=langchain --hidden-import=jieba --hidden-import=passlib.handlers.bcrypt --hidden-import=pycryptodome --collect-all chromadb --collect-all sentence_transformers backend/app/main.py
+
+      - name: Package (ZIP)
+        run: |
+          Compress-Archive -Path dist/Weix/* -DestinationPath dist/Weix-Windows.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Weix-Windows
+          path: dist/Weix-Windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Weix-macOS/Weix-macOS.dmg
+            Weix-Windows/Weix-Windows.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

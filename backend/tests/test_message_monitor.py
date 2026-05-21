@@ -1,7 +1,11 @@
 import os
 import sys
+import asyncio
+import threading
 from datetime import datetime
 from types import SimpleNamespace
+
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -94,3 +98,31 @@ def test_should_process_skips_recent_bot_sent_message(monkeypatch):
     msg.content = "AI 回复"
 
     assert monitor._should_process(msg) is False
+
+
+@pytest.mark.asyncio
+async def test_stop_waits_for_active_poll_executor_to_finish():
+    """停止监听时应等待正在执行的线程池查询结束，避免 loop 关闭后线程回调。"""
+    started = threading.Event()
+    release = threading.Event()
+
+    class BlockingDBReader:
+        def query_messages_since(self, timestamp: int):
+            started.set()
+            release.wait(timeout=1.0)
+            return []
+
+    monitor = MessageMonitor(
+        BlockingDBReader(),
+        MonitorConfig(poll_interval=60.0),
+    )
+    await monitor.start(lookback_seconds=0)
+    assert await asyncio.to_thread(started.wait, 1.0)
+
+    stop_task = asyncio.create_task(monitor.stop())
+    await asyncio.sleep(0.05)
+
+    assert not stop_task.done()
+
+    release.set()
+    await asyncio.wait_for(stop_task, timeout=1.0)

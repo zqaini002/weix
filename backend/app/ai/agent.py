@@ -96,13 +96,13 @@ class WeixAgent:
             return
 
         try:
-            from app.ai.embeddings import EmbeddingManager
-            from app.ai.vector_store import VectorStoreManager
+            from app.ai.embeddings import get_embedding_manager
+            from app.ai.vector_store import get_vector_store
             from app.ai.rag import RAGPipeline
 
             provider = "local"
-            self._embedding_manager = EmbeddingManager(provider=provider)
-            self._vector_store = VectorStoreManager()
+            self._embedding_manager = get_embedding_manager(provider=provider)
+            self._vector_store = get_vector_store()
             self._rag = RAGPipeline(self._embedding_manager, self._vector_store)
             logger.info("RAG pipeline initialized")
         except Exception as exc:
@@ -248,7 +248,7 @@ class WeixAgent:
                 # AI 自省去重检查 + 记住回复
                 if self._rag is not None and output:
                     try:
-                        is_dup = self._rag.check_duplicate_and_remember(session_id, output)
+                        is_dup = await self._rag.check_duplicate_and_remember(session_id, output)
                         if is_dup:
                             logger.info(f"Similar response detected for session={session_id}")
                     except Exception:

@@ -247,6 +247,7 @@ class VectorStoreManager:
         self,
         query_embedding: list[float],
         k: int = DEFAULT_SEARCH_K,
+        session_id: str = "",
         exclude_session: str = "",
     ) -> list[str]:
         """检索相似的历史对话摘要。
@@ -254,21 +255,28 @@ class VectorStoreManager:
         Args:
             query_embedding: 查询向量。
             k: 返回结果数。
+            session_id: 仅检索指定会话的摘要，避免不同联系人/群聊串记忆。
             exclude_session: 排除的 session_id（避免检索到当前对话自己）。
 
         Returns:
             相似摘要的文本列表。
         """
-        results = self.conversation_memory.query(
-            query_embeddings=[query_embedding],
-            n_results=k,
-            include=["documents", "metadatas", "distances"],
-        )
+        query_kwargs = {
+            "query_embeddings": [query_embedding],
+            "n_results": k,
+            "include": ["documents", "metadatas", "distances"],
+        }
+        if session_id:
+            query_kwargs["where"] = {"session_id": session_id}
+
+        results = self.conversation_memory.query(**query_kwargs)
 
         docs: list[str] = []
         if results["ids"] and results["ids"][0]:
             for i, doc_id in enumerate(results["ids"][0]):
                 meta = results["metadatas"][0][i] or {}
+                if session_id and meta.get("session_id") != session_id:
+                    continue
                 if exclude_session and meta.get("session_id") == exclude_session:
                     continue
                 distance = results["distances"][0][i] or 0
@@ -395,3 +403,61 @@ class VectorStoreManager:
         except Exception as exc:
             logger.warning(f"Failed to get recent responses: {exc}")
             return []
+
+    # ------------------------------------------------------------------
+    # 异步包装器（线程池执行，避免阻塞事件循环）
+    # ------------------------------------------------------------------
+
+    async def search_knowledge_async(self, query_embedding, k=3, threshold=0.6):
+        loop = __import__("asyncio").get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.search_knowledge(query_embedding, k, threshold)
+        )
+
+    async def search_similar_conversations_async(
+        self, query_embedding, k=3, session_id="", exclude_session=""
+    ):
+        loop = __import__("asyncio").get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.search_similar_conversations(
+                query_embedding, k, session_id, exclude_session
+            ),
+        )
+
+    async def check_duplicate_async(self, response_embedding, threshold=0.85):
+        loop = __import__("asyncio").get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.check_duplicate(response_embedding, threshold)
+        )
+
+    async def remember_response_async(self, session_id, response, embedding):
+        loop = __import__("asyncio").get_running_loop()
+        return await loop.run_in_executor(
+            None, lambda: self.remember_response(session_id, response, embedding)
+        )
+
+    async def add_conversation_summary_async(self, session_id, summary, embedding):
+        loop = __import__("asyncio").get_running_loop()
+        return await loop.run_in_executor(
+            None,
+            lambda: self.add_conversation_summary(session_id, summary, embedding),
+        )
+
+
+# ------------------------------------------------------------------
+# 全局单例
+# ------------------------------------------------------------------
+
+_vector_store_instance: VectorStoreManager | None = None
+_vs_lock = __import__("threading").Lock()
+
+
+def get_vector_store() -> VectorStoreManager:
+    """获取全局单例 VectorStoreManager（线程安全）。"""
+    global _vector_store_instance
+    if _vector_store_instance is None:
+        with _vs_lock:
+            if _vector_store_instance is None:
+                _vector_store_instance = VectorStoreManager()
+    return _vector_store_instance

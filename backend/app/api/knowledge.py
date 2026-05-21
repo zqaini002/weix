@@ -32,10 +32,10 @@ class KnowledgeResponse(BaseModel):
 
 
 def _get_vs():
-    """延迟获取 VectorStoreManager（通过 WeixAgent）。"""
+    """延迟获取 VectorStoreManager（单例）。"""
     try:
-        from app.ai.vector_store import VectorStoreManager
-        return VectorStoreManager()
+        from app.ai.vector_store import get_vector_store
+        return get_vector_store()
     except Exception as exc:
         logger.warning(f"VectorStoreManager 初始化失败: {exc}")
         return None
@@ -71,9 +71,9 @@ async def add_knowledge(req: KnowledgeAddRequest):
         return {"success": False, "error": "向量存储不可用"}
 
     try:
-        from app.ai.embeddings import EmbeddingManager
+        from app.ai.embeddings import get_embedding_manager
 
-        em = EmbeddingManager(provider="local")
+        em = get_embedding_manager(provider="local")
         embedding = em.embed_query(req.text)
         vs.add_knowledge(
             texts=[req.text],

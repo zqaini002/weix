@@ -4,12 +4,13 @@
     私聊 × 完整搜索
     私聊 × 免搜索 (skip_search)
     群聊 × 完整搜索
-    群聊 × 免搜索 (skip_search)
+    群聊 × 强制完整搜索
 """
 
 import pytest
 import sys
 import os
+import asyncio
 
 # 确保 backend 在 path 中
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -43,6 +44,32 @@ class TestConfig:
     def test_compat_sender_has_dedicated_senders(self, sender):
         assert isinstance(sender._private_sender, PrivateChatSender)
         assert isinstance(sender._group_sender, GroupChatSender)
+
+
+# ================================================================
+# 诊断日志
+# ================================================================
+
+class TestDiagnostics:
+    @pytest.mark.asyncio
+    async def test_run_logs_full_applescript_stderr(self, private_sender, monkeypatch, caplog):
+        """AppleScript 失败时应保留完整 stderr，不能截断真正的 Python traceback。"""
+        class FakeProcess:
+            returncode = 1
+
+            async def communicate(self):
+                return b"", ("traceback-start-" + ("x" * 260) + "-traceback-end").encode()
+
+        async def fake_create_subprocess_exec(*args, **kwargs):
+            return FakeProcess()
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+        with caplog.at_level("ERROR"):
+            ok = await private_sender._run("return 1", "send_text")
+
+        assert ok is False
+        assert "-traceback-end" in caplog.text
 
 
 # ================================================================
@@ -197,85 +224,41 @@ class TestParkingChat:
 # ================================================================
 
 class TestGroupChatFullSearch:
-    def test_uses_ocr_group_selection(self, group_sender):
-        """群聊搜索应 OCR 精确选择群聊结果，避免结果排序变化。"""
+    def test_group_full_search_uses_return_without_screenshot_or_ocr(self, group_sender):
+        """群聊搜索应回车确认第一条结果，不依赖截图或 OCR。"""
         script = group_sender._build_script(
             "测试消息", "贵州铜仁市129办公室工作群",
             skip_search=False,
         )
-        assert "selectGroupSearchResult" in script
         assert "贵州铜仁市129办公室工作群" in script
-        assert "--prefer-group-result" in script
-        assert "screenshot_helper.py" in script
-        assert "pyautogui.click" in script
+        assert "screenshot_helper.py" not in script
+        assert "weix_ocr_helper" not in script
+        assert "ocr_helper.swift" not in script
+        assert "verifyCurrentChatTitle" not in script
+        assert "selectGroupSearchResult" not in script
+        assert "pyautogui.click" not in script
+        assert "--window-owner" not in script
+        assert "--require-exact" not in script
+        runtime_script = script.split('tell application "WeChat" to activate', 1)[1]
+        paste_index = runtime_script.index("key code 9 using command down")
+        search_return_index = runtime_script.rindex("key code 36", 0, paste_index)
+        assert search_return_index < paste_index
 
-    def test_group_search_selection_requires_exact_match(self, group_sender):
-        """群聊搜索结果选择也必须精确匹配群名，避免点到相似群。"""
+    def test_group_full_search_confirms_result_before_sending(self, group_sender):
+        """完整搜索应先回车进入群聊，再聚焦输入框发送。"""
         script = group_sender._build_script(
             "测试消息", "贵州铜仁市129办公室工作群",
             skip_search=False,
         )
-        assert "--prefer-group-result --require-exact" in script
-
-    def test_group_search_screenshot_uses_pyautogui_window_crop(self, group_sender):
-        """群聊 OCR 应用 pyautogui 截整屏后裁剪窗口，避免 screencapture -R 失败。"""
-        script = group_sender._build_script(
-            "测试消息", "贵州铜仁市129办公室工作群",
-            skip_search=False,
+        runtime_script = script.split('tell application "WeChat" to activate', 1)[1]
+        search_index = runtime_script.index('keystroke "f" using command down')
+        select_index = runtime_script.rindex(
+            "key code 36",
+            0,
+            runtime_script.index("key code 9 using command down"),
         )
-        group_func = script.split("on verifyCurrentChatTitle")[0]
-        assert "screenshot_helper.py" in group_func
-        assert "set searchSize to size of searchWindow" in group_func
-        assert "set captureOutput to do shell script" in group_func
-        assert "screencapture -x -R" not in group_func
-        assert "set clickX to (captureX + ((item 1 of ocrParts as real) * captureW))" in group_func
-        assert "set clickY to (captureY + ((item 2 of ocrParts as real) * captureH))" in group_func
-
-    def test_group_search_verifies_current_chat_before_sending(self, group_sender):
-        """发送前必须校验当前聊天标题，避免发到搜一搜或其他群。"""
-        script = group_sender._build_script(
-            "测试消息", "贵州铜仁市129办公室工作群",
-            skip_search=False,
-        )
-        assert "verifyCurrentChatTitle" in script
-        assert "--verify-chat-title" in script
-        search_index = script.index("selectGroupSearchResult")
-        verify_index = script.rindex("verifyCurrentChatTitle")
-        paste_index = script.index("key code 9 using command down")
-        assert search_index < verify_index < paste_index
-
-    def test_group_title_verification_uses_pyautogui_capture(self, group_sender):
-        """标题校验也应避开 screencapture，复用 pyautogui 窗口裁剪截图。"""
-        script = group_sender._build_script(
-            "测试消息", "贵州铜仁市129办公室工作群",
-            skip_search=False,
-        )
-        verify_func = script.split("on verifyCurrentChatTitle")[1].split(
-            "end verifyCurrentChatTitle"
-        )[0]
-        assert "screenshot_helper.py" in verify_func
-        assert "set verifySize to size of verifyWindow" in verify_func
-        assert "screencapture" not in verify_func
-
-    def test_group_screenshots_are_stored_in_project_data_dir(self, group_sender):
-        """OCR 临时截图应放在项目内 data/tmp/screenshots，不写入系统 /tmp。"""
-        script = group_sender._build_script(
-            "测试消息", "贵州铜仁市129办公室工作群",
-            skip_search=False,
-        )
-        assert "data/tmp/screenshots/weix_group_search_ocr.png" in script
-        assert "data/tmp/screenshots/weix_current_chat_ocr.png" in script
-        assert "/tmp/weix_group_search_ocr.png" not in script
-        assert "/tmp/weix_current_chat_ocr.png" not in script
-
-    def test_group_title_verification_requires_exact_match(self, group_sender):
-        """群聊标题校验必须使用精确匹配，避免相似前缀群名误放行。"""
-        script = group_sender._build_script(
-            "测试消息", "贵州铜仁市129办公室工作群",
-            skip_search=False,
-        )
-        assert "--verify-chat-title" in script
-        assert "--require-exact" in script
+        paste_index = runtime_script.index("key code 9 using command down")
+        assert search_index < select_index < paste_index
 
     def test_group_search_does_not_use_arrow_selection(self, group_sender):
         """群聊结果位置会变化，不应再靠下箭头选择。"""
@@ -304,29 +287,42 @@ class TestGroupChatFullSearch:
 # ================================================================
 
 class TestGroupChatSkipSearch:
-    def test_no_search_matching_in_skip_search(self, group_sender):
-        """群聊免搜索不应执行搜索选择。"""
-        script = group_sender._build_script("再来一条", "测试群", skip_search=True)
-        assert "key code 125" not in script
-        assert "clickSearchResult" not in script
+    @pytest.mark.asyncio
+    async def test_group_sender_defaults_to_full_search_for_repeated_receiver(self, group_sender):
+        """群聊默认不复用当前窗口，避免生产路径依赖当前聊天状态。"""
+        scripts: list[str] = []
 
-    def test_clicks_input_box_before_paste(self, group_sender):
-        """群聊免搜索重复发送时也应点击输入区。"""
-        script = group_sender._build_script("再来一条", "测试群", skip_search=True)
-        paste_index = script.index("key code 9 using command down")
-        focus_index = script.rindex("focusMessageInput()", 0, paste_index)
-        assert focus_index < paste_index
+        async def fake_run(script: str, operation: str) -> bool:
+            scripts.append(script)
+            return True
 
-    def test_skip_search_verifies_group_title_before_paste(self, group_sender):
-        """群聊免搜索发送前也必须校验标题，避免当前窗口已切到其他群。"""
-        script = group_sender._build_script(
-            "再来一条", "贵州铜仁市129办公室工作群",
-            skip_search=True,
+        group_sender._run = fake_run
+
+        assert await group_sender.send_text("第一条", "测试群") is True
+        assert await group_sender.send_text("第二条", "测试群") is True
+
+        assert len(scripts) == 2
+        second_runtime = scripts[1].split('tell application "WeChat" to activate', 1)[1]
+        search_index = second_runtime.index('keystroke "f" using command down')
+        select_index = second_runtime.rindex(
+            "key code 36",
+            0,
+            second_runtime.index("key code 9 using command down"),
         )
-        assert 'my verifyCurrentChatTitle("贵州铜仁市129办公室工作群")' in script
-        verify_index = script.rindex('my verifyCurrentChatTitle("贵州铜仁市129办公室工作群")')
+        paste_index = second_runtime.index("key code 9 using command down")
+        assert search_index < select_index < paste_index
+
+    def test_group_forced_skip_still_builds_full_search(self, group_sender):
+        """群聊即使被要求免搜索，也应走完整搜索，避免发到当前私聊。"""
+        script = group_sender._build_script("再来一条", "测试群", skip_search=True)
+        assert 'keystroke "f" using command down' in script
+        assert "测试群" in script
+        assert "key code 125" not in script
+        assert "verifyCurrentChatTitle" not in script
+        assert "screenshot_helper.py" not in script
         paste_index = script.index("key code 9 using command down")
-        assert verify_index < paste_index
+        search_index = script.index('keystroke "f" using command down')
+        assert search_index < paste_index
 
 
 # ================================================================
@@ -340,16 +336,18 @@ class TestParameterPassing:
             "_is_group_receiver 应为参数传递而非可变状态"
         )
 
-    def test_is_group_controls_group_ocr_selection(self, sender):
-        """is_group 参数决定是否使用群聊 OCR 选择和标题校验。"""
+    def test_is_group_avoids_screenshot_ocr_path(self, sender):
+        """is_group 参数应走无截图、无 OCR 的群聊发送路径。"""
         script_group = sender._build_script(
             "x", "t", skip_search=False, is_group=True,
         )
         script_private = sender._build_script(
             "x", "t", skip_search=False, is_group=False,
         )
-        assert "selectGroupSearchResult" in script_group
-        assert "verifyCurrentChatTitle" in script_group
+        assert "screenshot_helper.py" not in script_group
+        assert "weix_ocr_helper" not in script_group
+        assert "verifyCurrentChatTitle" not in script_group
+        assert "selectGroupSearchResult" not in script_group
         assert "selectGroupSearchResult" not in script_private
         assert "verifyCurrentChatTitle" not in script_private
         assert "key code 125" not in script_private

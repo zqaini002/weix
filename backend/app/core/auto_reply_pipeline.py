@@ -59,11 +59,13 @@ class AutoReplyPipeline:
             return
 
         platform = Platform.get()
-        self._sender = platform.sender  # 兼容
-        # 私聊和群聊各自独立发送器，互不干扰
-        from app.core.sender_macos import PrivateChatSender, GroupChatSender
-        self._private_sender = PrivateChatSender()
-        self._group_sender = GroupChatSender()
+        self._sender = platform.sender
+        # 私有发送器用于停靠操作（macOS 是 PrivateChatSender，Windows 兼容处理）
+        if platform.is_macos:
+            from app.core.sender_macos import PrivateChatSender
+            self._private_sender = PrivateChatSender()
+        else:
+            self._private_sender = platform.sender
 
         # 1. 加载密钥
         keys = self._load_keys(platform)
@@ -157,72 +159,115 @@ class AutoReplyPipeline:
 
     @staticmethod
     def _open_message_db(platform, keys: dict[str, str]):
-        """打开消息数据库并返回 reader。"""
-        from app.core.db_reader_macos import MacOSDBReader
+        """打开消息数据库并返回 reader。
 
-        reader = MacOSDBReader()
+        按优先级收集候选文件（message_0.db > MSG.db > 其他），逐个尝试
+        打开并验证是否为真正的消息数据库（包含 Msg_% 表）。
+        """
+        reader = platform.db_reader
 
-        # 收集所有 DB 文件
         all_dbs: list[str] = []
         if hasattr(reader, "find_database_files"):
             all_dbs = reader.find_database_files()
 
-        # 查找 message_0.db
-        msg_db_path = None
-        msg_key = None
+        # 诊断：列出所有文件中的 message 相关 DB
+        msg_related = [f for f in all_dbs if "message" in os.path.basename(f).lower()]
+        logger.info(
+            f"找到 {len(all_dbs)} 个 DB 文件，"
+            f"其中 message 相关: {[os.path.basename(f) for f in msg_related]}"
+        )
+        logger.info(f"可用密钥: {list(keys.keys())}")
+
+        # 按优先级构建候选列表: message_0.db > MSG.db > 其他匹配
+        candidates: list[tuple[str, str]] = []  # (path, hex_key)
+        fallback: list[tuple[str, str]] = []
+
         for full_path in all_dbs:
+            basename = os.path.basename(full_path)
             for key_path, hex_key in keys.items():
-                if full_path.endswith(key_path) or key_path.endswith(
-                    os.path.basename(full_path)
-                ):
-                    if "message_0.db" in key_path or "message_0.db" in os.path.basename(
-                        full_path
-                    ):
-                        msg_db_path = full_path
-                        msg_key = hex_key
-                        break
-            if msg_db_path:
-                break
+                if not (full_path.endswith(key_path) or key_path.endswith(basename)):
+                    continue
+                if "message_0.db" in key_path or "message_0.db" in basename:
+                    candidates.append((full_path, hex_key))
+                elif "MSG.db" in key_path or "MSG.db" in basename:
+                    fallback.append((full_path, hex_key))
+                else:
+                    # 其他匹配 key 的文件作为最后兜底
+                    if not any(f == full_path for f, _ in candidates + fallback):
+                        fallback.append((full_path, hex_key))
 
-        if not msg_db_path:
-            # 回退到 MSG.db
-            for full_path in all_dbs:
-                for key_path, hex_key in keys.items():
-                    if "MSG.db" in key_path or "MSG.db" in os.path.basename(full_path):
-                        msg_db_path = full_path
-                        msg_key = hex_key
-                        break
-                if msg_db_path:
-                    break
+        all_candidates = candidates + fallback
 
-        if not msg_db_path:
-            logger.warning("未找到消息数据库")
-            return None
+        logger.info(
+            f"候选数据库: message_0={len(candidates)} 个, "
+            f"MSG={len([f for f,_ in fallback if 'MSG.db' in os.path.basename(f)])} 个, "
+            f"其他={len(fallback)} 个"
+        )
 
-        if not msg_key:
-            msg_key = list(keys.values())[0] if keys else ""
+        if not all_candidates:
+            # 诊断：检查是否 message_0.db 存在但缺少密钥
+            msg0_files = [f for f in all_dbs if "message_0.db" in os.path.basename(f)]
+            if msg0_files:
+                logger.warning(
+                    f"message_0.db 存在 ({msg0_files[0]}) 但无匹配密钥，"
+                    f"已提取的密钥路径: {list(keys.keys())}"
+                )
+                # 兜底：用所有已知密钥直接尝试 message_0.db
+                all_candidates = [(f, k) for f in msg0_files for k in keys.values()]
+                if not all_candidates:
+                    return None
+            else:
+                logger.warning("未找到消息数据库（无匹配密钥的 DB 文件）")
+                return None
 
-        try:
-            key_bytes = bytes.fromhex(msg_key)
-            if reader.open_db(msg_db_path, key_bytes):
-                logger.info(f"消息数据库已打开: {msg_db_path}")
-                return reader
-        except Exception as exc:
-            logger.error(f"打开消息数据库失败: {exc}")
+        # 逐个尝试，验证是否为真正的消息数据库
+        for db_path, hex_key in all_candidates:
+            basename = os.path.basename(db_path)
+            try:
+                key_bytes = bytes.fromhex(hex_key)
+                if not reader.open_db(db_path, key_bytes):
+                    continue
+                if reader.is_message_db():
+                    logger.info(f"消息数据库已打开: {db_path}")
+                    return reader
+                reader.close()
+            except Exception as exc:
+                logger.warning(f"打开候选数据库失败 ({basename}): {exc}")
+                continue
 
+        # 最终兜底：用所有密钥直接尝试 message_0.db（密钥可能未关联路径）
+        msg0_files = [f for f in all_dbs if "message_0.db" in os.path.basename(f)]
+        if msg0_files:
+            msg0_path = msg0_files[0]
+            logger.info(
+                f"候选数据库均非消息表，尝试用 {len(keys)} 个密钥直接解密 "
+                f"{os.path.basename(msg0_path)}"
+            )
+            for hex_key in keys.values():
+                try:
+                    key_bytes = bytes.fromhex(hex_key)
+                    if reader.open_db(msg0_path, key_bytes) and reader.is_message_db():
+                        logger.info(f"兜底成功: 消息数据库已打开: {msg0_path}")
+                        return reader
+                    reader.close()
+                except Exception:
+                    continue
+
+        logger.warning("所有候选数据库均不包含消息表，消息监控无法启动")
         return None
 
     @staticmethod
     def _build_name_map(platform, keys: dict[str, str]) -> dict[str, str]:
-        """构建 wxid -> 显示名 映射 (用于 AppleScript 搜索联系人)。"""
-        from app.core.db_reader_macos import MacOSDBReader
+        """构建 wxid -> 显示名 映射 (用于联系人搜索)。"""
+        db_reader = platform.db_reader
 
         name_map: dict[str, str] = {}
 
-        reader = MacOSDBReader()
         all_dbs: list[str] = []
-        if hasattr(reader, "find_database_files"):
-            all_dbs = reader.find_database_files()
+        if hasattr(db_reader, "find_database_files"):
+            all_dbs = db_reader.find_database_files()
+        elif hasattr(db_reader, "__class__") and hasattr(db_reader.__class__, "find_database_files"):
+            all_dbs = db_reader.__class__.find_database_files()
 
         # 查找 contact.db
         contact_db_path = None
@@ -246,7 +291,8 @@ class AutoReplyPipeline:
             return name_map
 
         try:
-            contact_reader = MacOSDBReader()
+            # 使用 platform.db_reader 获取同类 reader
+            contact_reader = platform.db_reader.__class__()
             key_bytes = bytes.fromhex(contact_key)
             if contact_reader.open_db(contact_db_path, key_bytes):
                 # 联系人
@@ -261,13 +307,27 @@ class AutoReplyPipeline:
                 for r in contact_reader.get_chatrooms():
                     room_id = r.get("room_id", "")
                     if room_id:
-                        name_map[room_id] = r.get("name", "") or room_id
+                        AutoReplyPipeline._merge_chatroom_name(
+                            name_map,
+                            room_id,
+                            r.get("name", ""),
+                        )
                 logger.info(f"名称映射已构建: {len(name_map)} 条")
                 contact_reader.close()
         except Exception as exc:
             logger.error(f"构建名称映射失败: {exc}")
 
         return name_map
+
+    @staticmethod
+    def _merge_chatroom_name(name_map: dict[str, str], room_id: str, name: str) -> None:
+        """合并群聊显示名，不用空值覆盖已有可搜索名称。"""
+        if not room_id:
+            return
+        current = name_map.get(room_id, "")
+        if current and not current.endswith("@chatroom"):
+            return
+        name_map[room_id] = name or current or room_id
 
     # ------------------------------------------------------------------
     # Internal: 规则初始化
@@ -461,12 +521,18 @@ class AutoReplyPipeline:
             display_name = self._name_map.get(receiver, receiver)
             force_skip = self._is_unsearchable_name(display_name)
             if force_skip:
-                logger.warning(
-                    "接收者名称无法搜索，回退到当前窗口发送 | receiver=%s | display_name=%s",
+                logger.error(
+                    "接收者名称无法搜索，拒绝自动发送 | receiver=%s | display_name=%s | is_group=%s",
                     receiver, display_name,
+                    msg.is_group,
                 )
-            snd = self._group_sender if msg.is_group else self._private_sender
-            success = await snd.send_text(reply_text, display_name, force_skip=force_skip)
+                return
+            success = await self._sender.send_text(
+                reply_text,
+                display_name,
+                force_skip=False,
+                is_group=msg.is_group,
+            )
             if success:
                 if self._monitor:
                     self._monitor.remember_sent_message(receiver, reply_text)
@@ -476,6 +542,13 @@ class AutoReplyPipeline:
                     reply_text[:50],
                 )
                 await self._park_after_reply()
+            else:
+                logger.error(
+                    "自动回复发送失败 | receiver=%s | display_name=%s | is_group=%s",
+                    receiver,
+                    display_name,
+                    msg.is_group,
+                )
 
     @staticmethod
     def _is_unsearchable_name(name: str) -> bool:
@@ -498,7 +571,8 @@ class AutoReplyPipeline:
         try:
             success = await self._private_sender.open_chat(self._parking_receiver)
             self._private_sender.reset_search_state()
-            self._group_sender.reset_search_state()
+            if hasattr(self._sender, "reset_search_state"):
+                self._sender.reset_search_state()
             if success:
                 logger.info("自动回复后已停靠到聊天 | receiver=%s", self._parking_receiver)
             else:

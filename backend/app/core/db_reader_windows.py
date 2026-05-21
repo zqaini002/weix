@@ -4,15 +4,17 @@
 以只读模式读取微信消息和联系人数据。
 """
 
+import hashlib
 import logging
 import os
 import sqlite3
 import struct
 import tempfile
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import ClassVar, Optional
 
 from Crypto.Cipher import AES
 from Crypto.Hash import SHA512
@@ -40,6 +42,12 @@ class WindowsDBReader(BaseDBReader):
     使用 pycryptodome 的 AES-256-CBC 手动解密 SQLCipher4 加密的数据库页面。
     在每个查询中按需解密所需页面，避免全量解密。
     """
+
+    # Windows 微信数据目录（常见路径）
+    WINDOWS_DATA_DIRS: ClassVar[list[str]] = [
+        os.path.expandvars(r"%USERPROFILE%\Documents\WeChat Files"),
+        os.path.expandvars(r"%APPDATA%\Tencent\WeChat"),
+    ]
 
     def __init__(self):
         self._key: Optional[bytes] = None
@@ -263,10 +271,194 @@ class WindowsDBReader(BaseDBReader):
                     logger.debug("临时解密文件已清理")
                 except Exception as exc:
                     logger.debug(f"清理临时文件异常: {exc}")
+                # 清理关联的 WAL/SHM/journal 文件
+                for suffix in ("-wal", "-shm", "-journal"):
+                    aux = self._decrypted_path + suffix
+                    if os.path.exists(aux):
+                        try:
+                            os.unlink(aux)
+                        except Exception:
+                            pass
                 self._decrypted_path = ""
 
     def __del__(self) -> None:
         self.close()
+
+    # --- 平台通用方法 ---
+
+    def is_message_db(self) -> bool:
+        """验证当前打开的数据库是否包含消息表（MSG 表）。"""
+        if self._sqlite_conn is None:
+            return False
+        try:
+            cursor = self._sqlite_conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='MSG'"
+            )
+            count = cursor.fetchone()[0]
+            return count > 0
+        except Exception:
+            return False
+
+    def is_contact_db(self) -> bool:
+        """验证当前打开的数据库是否包含联系人表。"""
+        if self._sqlite_conn is None:
+            return False
+        try:
+            cursor = self._sqlite_conn.execute(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name IN ('Contact', 'ChatRoom')"
+            )
+            count = cursor.fetchone()[0]
+            return count >= 1
+        except Exception:
+            return False
+
+    @classmethod
+    def get_current_wxid(cls) -> str:
+        """获取当前登录用户的 wxid。
+
+        通过扫描微信数据目录中 wxid_ 开头的文件夹获取。
+        """
+        for base_dir in cls.WINDOWS_DATA_DIRS:
+            expanded = os.path.expandvars(base_dir)
+            if not os.path.exists(expanded):
+                continue
+            try:
+                for entry in os.scandir(expanded):
+                    if entry.is_dir() and entry.name.startswith("wxid_"):
+                        return entry.name
+            except OSError:
+                continue
+        return ""
+
+    @classmethod
+    def find_database_files(cls, wxid: str = "") -> list[str]:
+        """查找 Windows 上指定 wxid 的所有 .db 数据库文件。
+
+        目录结构: WeChat Files/<wxid>/Msg/ 下有 Multiple/ 子目录，
+        每个子目录包含 MSG.db、Contact.db 等。
+        """
+        db_files: list[str] = []
+
+        for base_dir in cls.WINDOWS_DATA_DIRS:
+            expanded = os.path.expandvars(base_dir)
+            if not os.path.exists(expanded):
+                continue
+
+            try:
+                for wxid_entry in os.scandir(expanded):
+                    if not wxid_entry.is_dir():
+                        continue
+                    if not wxid_entry.name.startswith("wxid_"):
+                        continue
+                    if wxid and wxid_entry.name != wxid:
+                        continue
+
+                    msg_dir = os.path.join(wxid_entry.path, "Msg")
+                    if not os.path.isdir(msg_dir):
+                        continue
+
+                    for root, _dirs, files in os.walk(msg_dir):
+                        for fname in files:
+                            if fname.endswith(".db"):
+                                db_files.append(os.path.join(root, fname))
+            except OSError:
+                continue
+
+        return db_files
+
+    @classmethod
+    def cleanup_temp_files(cls, stale_seconds: int = 600) -> int:
+        """清理过期的解密临时文件及其 WAL/SHM/journal 辅助文件。
+
+        Returns:
+            已删除的文件数量。
+        """
+        tmp_dir = tempfile.gettempdir()
+        now = time.time()
+        removed = 0
+        try:
+            for name in os.listdir(tmp_dir):
+                if not name.startswith("weix_decrypted_"):
+                    continue
+                if not (
+                    name.endswith(".db")
+                    or name.endswith(".db-wal")
+                    or name.endswith(".db-shm")
+                    or name.endswith(".db-journal")
+                ):
+                    continue
+                fpath = os.path.join(tmp_dir, name)
+                try:
+                    if now - os.path.getmtime(fpath) > stale_seconds:
+                        os.unlink(fpath)
+                        removed += 1
+                except OSError:
+                    pass
+        except OSError:
+            pass
+        if removed:
+            logger.info(f"已清理 {removed} 个临时解密文件")
+        return removed
+
+    def get_my_messages(
+        self,
+        limit: int = 5000,
+        since_days: int = 90,
+    ) -> list[dict]:
+        """提取当前用户发出的所有文本消息（用于风格分析）。
+
+        Windows 版 MSG 表中需要根据 talker 和 is_sender 字段判断。
+        """
+        if self._sqlite_conn is None:
+            logger.error("数据库未打开")
+            return []
+
+        since_ts = int(time.time()) - since_days * 86400
+
+        try:
+            cursor = self._sqlite_conn.execute(
+                """
+                SELECT msg_content, msg_create_time, msg_talker
+                FROM MSG
+                WHERE msg_create_time > ?
+                AND msg_type = ?
+                AND is_sender = 1
+                ORDER BY msg_create_time DESC
+                LIMIT ?
+                """,
+                (since_ts, MSG_TYPE_TEXT, limit),
+            )
+
+            messages: list[dict] = []
+            for row in cursor:
+                talker = row["msg_talker"] or ""
+                is_group = "@chatroom" in str(talker)
+
+                content = row["msg_content"] or ""
+                if isinstance(content, bytes):
+                    try:
+                        content = content.decode("utf-8", errors="replace")
+                    except Exception:
+                        content = str(content)
+                content = str(content).strip()
+                if not content or len(content) < 2:
+                    continue
+
+                messages.append({
+                    "content": content,
+                    "create_time": row["msg_create_time"],
+                    "room_id": str(talker) if is_group else "",
+                    "is_group": is_group,
+                })
+
+            logger.info(f"提取当前用户消息: {len(messages)} 条")
+            return messages
+
+        except Exception as exc:
+            logger.error(f"提取当前用户消息失败: {exc}")
+            return []
 
     # --- 内部方法 ---
 
