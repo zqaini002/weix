@@ -80,12 +80,14 @@ def create_llm(config: LLMConfig | None = None, **kwargs) -> ChatOpenAI:
     """
     if config is None:
         from app.config import get_config
+        import os
 
         cfg = get_config()
         ai_cfg = cfg.ai if isinstance(cfg.ai, dict) else {}
+        api_key = ai_cfg.get("api_key", "") or os.getenv("DEEPSEEK_API_KEY", "")
         config = LLMConfig(
             provider=ai_cfg.get("provider", "dashscope"),
-            api_key=ai_cfg.get("api_key", ""),
+            api_key=api_key,
             base_url=ai_cfg.get("base_url", ""),
             model=ai_cfg.get("model", "qwen-plus"),
             temperature=ai_cfg.get("temperature", 0.7),

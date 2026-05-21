@@ -118,7 +118,7 @@ class EmbeddingManager:
             config = get_config()
             ai_cfg = config.ai if hasattr(config, "ai") else {}
 
-            api_key = self._api_key or ai_cfg.get("api_key", "")
+            api_key = self._api_key or ai_cfg.get("api_key", "") or os.getenv("DEEPSEEK_API_KEY", "")
             base_url = self._base_url or PROVIDER_EMBEDDING_URLS.get(
                 self._provider, ""
             )
