@@ -562,10 +562,12 @@ class WindowsDBReader(BaseDBReader):
             logger.info(
                 f"数据库解密完成 ({total_pages} 页) -> {tmp_path}"
             )
+            tmp.close()
             return tmp_path
 
         except Exception:
             # 出错时清理临时文件
+            tmp.close()
             try:
                 os.unlink(tmp_path)
             except Exception:

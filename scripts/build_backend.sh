@@ -84,7 +84,7 @@ pyinstaller \
 
 info "后端打包完成: $DIST_DIR/Weix"
 
-# 4. 创建启动脚本
+# 4. 创建启动脚本 (Weix 目录内部)
 cat > "$DIST_DIR/Weix/start_weix.sh" << 'LAUNCHER'
 #!/bin/bash
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -100,8 +100,44 @@ wait $BACKEND_PID
 LAUNCHER
 chmod +x "$DIST_DIR/Weix/start_weix.sh"
 
+# 5. 组装 macOS .app 应用包
+info "组装 macOS .app 应用包..."
+APP_BUNDLE="$DIST_DIR/Weix.app"
+mkdir -p "$APP_BUNDLE/Contents/MacOS"
+mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+mv "$DIST_DIR/Weix" "$APP_BUNDLE/Contents/Resources/"
+
+cat > "$APP_BUNDLE/Contents/Info.plist" << 'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>start_weix</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.weix.app</string>
+    <key>CFBundleName</key>
+    <string>Weix</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.13</string>
+</dict>
+</plist>
+PLIST
+
+cat > "$APP_BUNDLE/Contents/MacOS/start_weix" << 'LAUNCHER2'
+#!/bin/bash
+APP_DIR="$(cd "$(dirname "$0")/../../" && pwd)"
+osascript -e "tell application \"Terminal\"" -e "activate" -e "do script \"\\\"$APP_DIR/Contents/Resources/Weix/start_weix.sh\\\"\"" -e "end tell"
+LAUNCHER2
+chmod +x "$APP_BUNDLE/Contents/MacOS/start_weix"
+
 info "=========================================="
 info " 构建完成"
-info " 应用目录: $DIST_DIR/Weix"
-info " 启动方式: $DIST_DIR/Weix/start_weix.sh"
+info " 应用目录: $APP_BUNDLE"
+info " 启动方式: 双击打开 Weix.app"
 info "=========================================="

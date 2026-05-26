@@ -90,8 +90,33 @@ class WindowsKeyExtractor(BaseKeyExtractor):
 
     def __init__(self):
         self._kernel32 = ctypes.windll.kernel32
+        self._setup_ctypes()
         self._keys: dict[str, str] = {}
         self._all_keys_file = Path("data/all_keys.json")
+
+    def _setup_ctypes(self):
+        """配置 ctypes 函数签名，防止 64 位系统指针截断。"""
+        import ctypes.wintypes
+        SIZE_T = ctypes.c_size_t
+        HANDLE = ctypes.wintypes.HANDLE
+        LPVOID = ctypes.wintypes.LPVOID
+        DWORD = ctypes.wintypes.DWORD
+        BOOL = ctypes.wintypes.BOOL
+
+        self._kernel32.OpenProcess.argtypes = [DWORD, BOOL, DWORD]
+        self._kernel32.OpenProcess.restype = HANDLE
+
+        self._kernel32.GetSystemInfo.argtypes = [ctypes.POINTER(SYSTEM_INFO)]
+        self._kernel32.GetSystemInfo.restype = None
+
+        self._kernel32.VirtualQueryEx.argtypes = [HANDLE, LPVOID, ctypes.POINTER(MEMORY_BASIC_INFORMATION), SIZE_T]
+        self._kernel32.VirtualQueryEx.restype = SIZE_T
+
+        self._kernel32.ReadProcessMemory.argtypes = [HANDLE, LPVOID, LPVOID, SIZE_T, ctypes.POINTER(SIZE_T)]
+        self._kernel32.ReadProcessMemory.restype = BOOL
+
+        self._kernel32.CloseHandle.argtypes = [HANDLE]
+        self._kernel32.CloseHandle.restype = BOOL
 
     # --- 公共接口 ---
 

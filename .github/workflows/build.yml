@@ -114,6 +114,42 @@ jobs:
 
       - name: Package (ZIP)
         run: |
+          Compress-Archive -Path dist/Weix -DestinationPath dist/Weix-Windows.zip
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Weix-Windows
+          path: dist/Weix-Windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Weix-macOS/Weix-macOS.dmg
+            Weix-Windows/Weix-Windows.zip
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+     npm run build
+
+      - name: Build Backend (PyInstaller)
+        run: |
+          python -m venv venv
+          venv\Scripts\activate
+          pip install -r backend/requirements.txt
+          pip install pyinstaller
+          pyinstaller --name=Weix --onedir --console --clean --noconfirm --paths=backend --add-data "config;config" --add-data "data;data" --add-data "frontend/dist;frontend_dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=sqlalchemy.ext.asyncio --hidden-import=aiosqlite --hidden-import=chromadb --hidden-import=sentence_transformers --hidden-import=tiktoken --hidden-import=langchain --hidden-import=jieba --hidden-import=passlib.handlers.bcrypt --hidden-import=pycryptodome --collect-all chromadb --collect-all sentence_transformers backend/app/main.py
+
+      - name: Package (ZIP)
+        run: |
           Compress-Archive -Path dist/Weix/* -DestinationPath dist/Weix-Windows.zip
 
       - name: Upload Artifact
