@@ -2,7 +2,7 @@
 REM ============================================================
 REM Weix - Windows 构建脚本
 REM 构建前端 + 打包后端为独立应用
-REM 产物: dist\Weix\ (目录包含 Weix.exe)
+REM 产物: dist\Weix\ (目录包含 Weix.exe GUI 启动器)
 REM ============================================================
 setlocal EnableDelayedExpansion
 
@@ -42,46 +42,74 @@ call venv\Scripts\activate.bat
 pip install -q -r "%BACKEND_DIR%\requirements.txt"
 pip install -q pyinstaller
 
-REM 3. PyInstaller 打包
-echo [3/4] 打包后端...
+REM 3. PyInstaller 打包 (以 launcher.py 作为 GUI 入口)
+echo [3/4] 打包中 (这可能需要几分钟)...
 
 pyinstaller ^
     --name=Weix ^
     --onedir ^
-    --console ^
+    --noconsole ^
+    --windowed ^
     --clean ^
     --noconfirm ^
     --paths="%BACKEND_DIR%" ^
     --add-data "%PROJECT_DIR%\config;config" ^
     --add-data "%PROJECT_DIR%\data;data" ^
     --add-data "%FRONTEND_DIST%;frontend_dist" ^
+    --hidden-import=PyQt6 ^
+    --hidden-import=PyQt6.QtWidgets ^
+    --hidden-import=PyQt6.QtCore ^
+    --hidden-import=PyQt6.QtGui ^
+    --hidden-import=uvicorn ^
     --hidden-import=uvicorn.logging ^
+    --hidden-import=uvicorn.loops ^
     --hidden-import=uvicorn.loops.auto ^
+    --hidden-import=uvicorn.protocols ^
+    --hidden-import=uvicorn.protocols.http ^
     --hidden-import=uvicorn.protocols.http.auto ^
+    --hidden-import=uvicorn.protocols.websockets ^
+    --hidden-import=uvicorn.protocols.websockets.auto ^
+    --hidden-import=uvicorn.lifespan ^
+    --hidden-import=uvicorn.lifespan.on ^
+    --hidden-import=fastapi ^
+    --hidden-import=fastapi.staticfiles ^
     --hidden-import=sqlalchemy.ext.asyncio ^
     --hidden-import=aiosqlite ^
     --hidden-import=chromadb ^
     --hidden-import=sentence_transformers ^
     --hidden-import=tiktoken ^
     --hidden-import=langchain ^
+    --hidden-import=langchain_community ^
+    --hidden-import=langchain_core ^
+    --hidden-import=langgraph ^
     --hidden-import=jieba ^
     --hidden-import=passlib.handlers.bcrypt ^
     --hidden-import=pycryptodome ^
     --hidden-import=yaml ^
+    --hidden-import=pydantic ^
     --hidden-import=pydantic_settings ^
+    --hidden-import=httpx ^
+    --hidden-import=apscheduler ^
     --collect-all chromadb ^
     --collect-all sentence_transformers ^
-    "%BACKEND_DIR%\app\main.py"
+    "%BACKEND_DIR%\launcher.py"
+
+if errorlevel 1 (
+    echo 打包失败！请检查错误信息。
+    pause
+    exit /b 1
+)
 
 echo 后端打包完成: %DIST_DIR%\Weix
 
-REM 4. 创建启动脚本
-echo [4/4] 创建启动脚本...
-copy "%PROJECT_DIR%\scripts\start_weix.bat" "%DIST_DIR%\Weix\start_weix.bat" >nul
+REM 4. 清理构建临时文件
+echo [4/4] 清理临时文件...
+if exist "%BUILD_DIR%" rmdir /s /q "%BUILD_DIR%"
+if exist "%PROJECT_DIR%\Weix.spec" del "%PROJECT_DIR%\Weix.spec"
 
 echo ==========================================
-echo  构建完成
+echo  构建完成!
 echo  应用目录: %DIST_DIR%\Weix
-echo  启动方式: %DIST_DIR%\Weix\start_weix.bat
+echo  启动方式: 双击 %DIST_DIR%\Weix\Weix.exe
 echo ==========================================
 pause

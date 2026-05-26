@@ -1,13 +1,16 @@
 from contextlib import asynccontextmanager
+import asyncio
 import logging
+import sys
 
+import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_config
 from app.deps import init_database, get_session_factory
 from app.utils.logger import setup_logging
-from app.utils.paths import get_data_dir
+from app.utils.paths import get_data_dir, get_base_dir
 
 logger = logging.getLogger(__name__)
 
@@ -155,3 +158,23 @@ app.include_router(persona_router)
 async def health():
     config = get_config()
     return {"status": "ok", "platform": config.get_platform()}
+
+
+# --- 前端静态文件服务 (必须放在所有路由之后) ---
+from fastapi.staticfiles import StaticFiles
+
+_frontend_dir = get_base_dir() / "frontend_dist"
+if _frontend_dir.exists():
+    app.mount("/", StaticFiles(directory=str(_frontend_dir), html=True), name="frontend")
+
+
+# --- 独立运行入口 ---
+if __name__ == "__main__":
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+    )
