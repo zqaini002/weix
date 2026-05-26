@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.ai.models import create_llm
+from app.utils.paths import get_data_dir
 from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
@@ -75,10 +76,10 @@ class StyleDistiller:
         legacy_cache_path: str | Path | None = None,
     ) -> None:
         self._llm = create_llm(llm_config)
-        root = Path(__file__).parent.parent.parent.parent
-        self._cache_path = Path(cache_path) if cache_path else root / "data" / "persona_skill.json"
+        data_dir = get_data_dir()
+        self._cache_path = Path(cache_path) if cache_path else data_dir / "persona_skill.json"
         self._legacy_cache_path = (
-            Path(legacy_cache_path) if legacy_cache_path else root / "data" / "persona.json"
+            Path(legacy_cache_path) if legacy_cache_path else data_dir / "persona.json"
         )
         self._cached_skill: Optional[dict[str, Any]] = None
         self._load_cache()

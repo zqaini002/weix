@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import get_config
 from app.deps import init_database, get_session_factory
 from app.utils.logger import setup_logging
+from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ def _try_auto_extract_keys():
     from pathlib import Path
 
     # 已缓存则跳过
-    if Path("data/all_keys.json").exists():
+    if (get_data_dir() / "all_keys.json").exists():
         logger.info("密钥已缓存，跳过提取")
         return
 

@@ -17,6 +17,7 @@ from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.tools import tool
 
 from app.config import get_config
+from app.utils.paths import get_base_dir
 
 logger = logging.getLogger(__name__)
 
@@ -258,7 +259,7 @@ def _make_query_statistics(db_url: str = "") -> Callable:
 
             db_path = raw_url.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
             if not Path(db_path).is_absolute():
-                db_path = str(Path(__file__).parent.parent.parent.parent.parent / db_path)
+                db_path = str(get_base_dir() / db_path)
 
             if not Path(db_path).exists():
                 return f"暂无统计数据（数据库文件不存在）"

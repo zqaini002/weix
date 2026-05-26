@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 from fastapi import Depends
@@ -9,12 +10,13 @@ from app.models.database import Base
 from app.services.message_service import MessageService
 from app.services.statistics_service import StatisticsService
 from app.services.report_service import ReportService
+from app.utils.paths import get_base_dir
 
 _engine = None
 _session_factory = None
 
-# 项目根目录 (backend 的父目录)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# 项目根目录
+_PROJECT_ROOT = get_base_dir()
 
 
 def get_engine():

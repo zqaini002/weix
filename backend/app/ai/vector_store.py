@@ -19,6 +19,7 @@ import chromadb
 from chromadb.config import Settings as ChromaSettings
 
 from app.config import get_config
+from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +46,8 @@ def _build_project_dir() -> str:
     if base:
         return base
 
-    # 默认路径：项目根下的 data/chroma
-    candidate = Path(__file__).parent.parent.parent.parent / "data" / "chroma"
-    return str(candidate)
+    # 默认路径：data/chroma
+    return str(get_data_dir() / "chroma")
 
 
 class VectorStoreManager:

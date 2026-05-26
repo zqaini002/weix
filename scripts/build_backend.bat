@@ -18,6 +18,13 @@ echo ==========================================
 echo  Weix Windows 构建
 echo ==========================================
 
+REM 0. 检查并创建 .env 文件
+if not exist "%PROJECT_DIR%\.env" (
+    echo [0/4] 创建默认 .env 文件...
+    copy "%PROJECT_DIR%\.env.example" "%PROJECT_DIR%\.env" >nul
+    echo 已创建 .env 文件，请根据需要修改配置
+)
+
 REM 1. 构建前端
 echo [1/4] 构建前端...
 cd /d "%PROJECT_DIR%\frontend"
@@ -45,8 +52,8 @@ pyinstaller ^
     --clean ^
     --noconfirm ^
     --paths="%BACKEND_DIR%" ^
-    --add-data "config;config" ^
-    --add-data "data;data" ^
+    --add-data "%PROJECT_DIR%\config;config" ^
+    --add-data "%PROJECT_DIR%\data;data" ^
     --add-data "%FRONTEND_DIST%;frontend_dist" ^
     --hidden-import=uvicorn.logging ^
     --hidden-import=uvicorn.loops.auto ^
@@ -60,6 +67,8 @@ pyinstaller ^
     --hidden-import=jieba ^
     --hidden-import=passlib.handlers.bcrypt ^
     --hidden-import=pycryptodome ^
+    --hidden-import=yaml ^
+    --hidden-import=pydantic_settings ^
     --collect-all chromadb ^
     --collect-all sentence_transformers ^
     "%BACKEND_DIR%\app\main.py"
@@ -68,14 +77,7 @@ echo 后端打包完成: %DIST_DIR%\Weix
 
 REM 4. 创建启动脚本
 echo [4/4] 创建启动脚本...
-(
-echo @echo off
-echo cd /d "%%~dp0"
-echo start "" "Weix.exe"
-echo echo Weix 服务已启动: http://localhost:8000
-echo echo 前端界面: http://localhost:8000
-echo pause
-) > "%DIST_DIR%\Weix\start_weix.bat"
+copy "%PROJECT_DIR%\scripts\start_weix.bat" "%DIST_DIR%\Weix\start_weix.bat" >nul
 
 echo ==========================================
 echo  构建完成

@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 
 import yaml
@@ -16,6 +17,7 @@ from app.models.schemas import (
     SystemConfigUpdate, SystemConfigItem,
 )
 from app.config import get_config
+from app.utils.paths import get_config_dir
 
 router = APIRouter(prefix="/api", tags=["config"], dependencies=[Depends(verify_token)])
 
@@ -23,7 +25,7 @@ router = APIRouter(prefix="/api", tags=["config"], dependencies=[Depends(verify_
 def _get_config_path() -> str:
     return os.getenv(
         "WEIX_CONFIG",
-        str(Path(__file__).parent.parent.parent.parent / "config" / "config.yaml"),
+        str(get_config_dir() / "config.yaml"),
     )
 
 

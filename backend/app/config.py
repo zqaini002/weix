@@ -6,6 +6,8 @@ from typing import Any
 import yaml
 from pydantic_settings import BaseSettings
 
+from app.utils.paths import get_base_dir, get_config_dir
+
 
 class Config(BaseSettings):
     """Application configuration loaded from YAML with env override."""
@@ -30,7 +32,10 @@ class Config(BaseSettings):
     @classmethod
     def from_yaml(cls, path: str | None = None) -> "Config":
         if path is None:
-            path = os.getenv("WEIX_CONFIG", str(Path(__file__).resolve().parent.parent.parent / "config" / "config.yaml"))
+            path = os.getenv("WEIX_CONFIG", str(get_config_dir() / "config.yaml"))
+
+        if not Path(path).exists():
+            raise FileNotFoundError(f"配置文件不存在: {path}")
 
         with open(path, encoding="utf-8") as f:
             raw = yaml.safe_load(f)

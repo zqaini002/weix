@@ -26,19 +26,19 @@ from app.ai.prompts import (
     get_prompt_for_context,
 )
 from app.ai.tools import create_tools
+from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
 MAX_RETRIES: int = 3
 AGENT_TIMEOUT: int = 60
 
-CHECKPOINTS_FILE = "data/checkpoints.json"
+CHECKPOINTS_FILE = "checkpoints.json"
 
 
 def _checkpoints_path() -> str:
     """获取 checkpoints 持久化文件路径。"""
-    base = Path(__file__).parent.parent.parent.parent
-    return str(base / CHECKPOINTS_FILE)
+    return str(get_data_dir() / CHECKPOINTS_FILE)
 
 
 class WeixAgent:
