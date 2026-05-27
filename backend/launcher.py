@@ -259,14 +259,31 @@ class MainWindow(QMainWindow):
         self._log("正在启动 Weix 服务...")
         self._update_ui_state(ServiceState.STARTING)
 
+        # PyInstaller --windowed: stdout/stderr 可能为 None
+        if sys.stdout is None:
+            sys.stdout = _NullStream()
+        if sys.stderr is None:
+            sys.stderr = _NullStream()
+
         # 安装日志桥接 handler (捕获 uvicorn + app 的日志)
         handler = QtLogHandler()
         handler.setLevel(logging.DEBUG)
         logging.getLogger().addHandler(handler)
-        # 降低 uvicorn 日志级别以便看到更多信息
         logging.getLogger("uvicorn").setLevel(logging.INFO)
 
+        # 先测试 app 模块能否正常导入
+        self._log("检查 app 模块...")
+        try:
+            from app.main import app as asgi_app
+            self._log(f"app 模块加载成功: {asgi_app.title}")
+        except Exception:
+            import traceback
+            self._log(f"app 模块加载失败:\n{traceback.format_exc()}")
+            self._update_ui_state(ServiceState.ERROR)
+            return
+
         # 在守护线程中启动 uvicorn
+        self._log("启动 uvicorn 服务器...")
         _server_thread = threading.Thread(
             target=_run_uvicorn,
             args=(SERVER_HOST, SERVER_PORT),
