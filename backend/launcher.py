@@ -109,9 +109,25 @@ _server = None
 _server_thread = None
 
 
+class _NullStream:
+    """PyInstaller --windowed 模式下 sys.stdout/stderr 为 None 的替代品。"""
+    def write(self, *a, **kw): pass
+    def flush(self): pass
+    def isatty(self): return False
+    def fileno(self): raise OSError("no fileno")
+    def readable(self): return False
+    def writable(self): return True
+
+
 def _run_uvicorn(host: str, port: int):
     """在当前线程中运行 uvicorn (阻塞)。"""
     global _server
+
+    # PyInstaller --windowed 模式下 stdout/stderr 为 None, uvicorn 会崩溃
+    if sys.stdout is None:
+        sys.stdout = _NullStream()
+    if sys.stderr is None:
+        sys.stderr = _NullStream()
 
     try:
         import uvicorn
