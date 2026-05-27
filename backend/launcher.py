@@ -107,6 +107,7 @@ class HealthCheckThread(QThread):
 # ============================================================
 _server = None
 _server_thread = None
+_server_error = ""
 
 
 def _fix_none_streams():
@@ -120,10 +121,12 @@ def _fix_none_streams():
 
 def _run_uvicorn(host: str, port: int):
     """在当前线程中运行 uvicorn (阻塞)。"""
-    global _server
+    global _server, _server_error
     log = logging.getLogger("launcher")
 
     _fix_none_streams()
+    _server_error = ""
+    loop = None
 
     try:
         import uvicorn
@@ -147,10 +150,21 @@ def _run_uvicorn(host: str, port: int):
 
         log.info("正在启动 uvicorn 服务 (%s:%d)...", host, port)
         loop.run_until_complete(_server.serve())
-        log.info("uvicorn 服务已停止")
-    except Exception:
+        if not getattr(_server, "should_exit", False):
+            _server_error = "uvicorn 服务在就绪前退出，请查看上方日志"
+            log.error(_server_error)
+        else:
+            log.info("uvicorn 服务已停止")
+    except BaseException:
         import traceback
-        log.error("uvicorn 启动失败:\n%s", traceback.format_exc())
+        _server_error = traceback.format_exc()
+        log.error("uvicorn 启动失败:\n%s", _server_error)
+    finally:
+        if loop is not None:
+            try:
+                loop.close()
+            except Exception:
+                pass
 
 
 # ============================================================
@@ -253,10 +267,11 @@ class MainWindow(QMainWindow):
     # 启动服务 (进程内)
     # --------------------------------------------------------
     def _on_start(self):
-        global _server_thread
+        global _server_thread, _server_error
 
         self._log_text.clear()
         self._startup_timer_count = 0
+        _server_error = ""
         self._log("正在启动 Weix 服务...")
         self._update_ui_state(ServiceState.STARTING)
 
@@ -264,9 +279,13 @@ class MainWindow(QMainWindow):
         _fix_none_streams()
 
         # 安装日志桥接 handler (捕获 uvicorn + app 的日志)
-        handler = QtLogHandler()
-        handler.setLevel(logging.DEBUG)
-        logging.getLogger().addHandler(handler)
+        root_logger = logging.getLogger()
+        if not any(getattr(h, "_weix_qt_handler", False) for h in root_logger.handlers):
+            handler = QtLogHandler()
+            handler.setLevel(logging.DEBUG)
+            handler._weix_qt_handler = True
+            root_logger.addHandler(handler)
+        root_logger.setLevel(logging.INFO)
         logging.getLogger("uvicorn").setLevel(logging.INFO)
 
         # 先测试 app 模块能否正常导入
@@ -306,6 +325,13 @@ class MainWindow(QMainWindow):
 
     def _on_health_failed(self, reason: str):
         if self._state == ServiceState.STARTING:
+            if _server_thread and not _server_thread.is_alive():
+                error = _server_error or f"服务进程已退出，最后一次健康检查失败: {reason}"
+                self._log(f"错误: {error}")
+                self._update_ui_state(ServiceState.ERROR)
+                self._statusbar.showMessage("服务启动失败，请查看日志")
+                return
+
             self._startup_timer_count += 1
             if self._startup_timer_count % 5 == 0:
                 self._statusbar.showMessage(f"等待服务就绪... ({reason})")
@@ -392,12 +418,53 @@ class MainWindow(QMainWindow):
 
 
 # ============================================================
+# 管理员权限检测
+# ============================================================
+def _is_admin() -> bool:
+    """检查当前是否以管理员权限运行 (仅 Windows)。"""
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        return ctypes.windll.shell32.IsUserAnAdmin() != 0
+    except Exception:
+        return False
+
+
+def _request_admin():
+    """以管理员权限重新启动当前程序 (仅 Windows)。"""
+    import ctypes
+    exe = sys.executable
+    # ShellExecuteW: 'runas' 会弹出 UAC 提权对话框
+    ctypes.windll.shell32.ShellExecuteW(
+        None, "runas", exe, "", "", 1
+    )
+
+
+# ============================================================
 # 入口
 # ============================================================
 def main():
     # PyInstaller 打包后, 切换工作目录到 exe 所在目录
     if getattr(sys, 'frozen', False):
         os.chdir(Path(sys.executable).parent)
+
+    # Windows: 检查管理员权限, 非管理员时询问是否提权
+    if sys.platform == "win32" and not _is_admin():
+        # 先创建 QApplication 才能弹 QMessageBox
+        _app = QApplication(sys.argv)
+        reply = QMessageBox.question(
+            None, "权限请求",
+            "以管理员权限运行可以自动提取微信数据库密钥。\n\n"
+            "是否以管理员身份重新启动？\n"
+            "（选择「否」可以继续以普通权限运行）",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            _request_admin()
+            sys.exit(0)
+        # 用户选「否」, 继续以普通权限运行
 
     app = QApplication(sys.argv)
     app.setApplicationName("Weix")
