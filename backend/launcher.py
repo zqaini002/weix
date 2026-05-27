@@ -73,15 +73,21 @@ class HealthCheckThread(QThread):
     """轮询 /api/health 检测服务是否就绪。"""
     health_ok = pyqtSignal()
     health_failed = pyqtSignal(str)
+    health_timeout = pyqtSignal()
 
-    def __init__(self, url: str, interval_ms: int):
+    def __init__(self, url: str, interval_ms: int, timeout_s: int = 60):
         super().__init__()
         self._url = url
         self._interval = interval_ms / 1000.0
+        self._timeout = timeout_s
         self._running = True
 
     def run(self):
+        start = time.time()
         while self._running:
+            if time.time() - start > self._timeout:
+                self.health_timeout.emit()
+                return
             try:
                 req = urllib.request.Request(self._url, method='GET')
                 with urllib.request.urlopen(req, timeout=3) as resp:
@@ -106,20 +112,28 @@ _server_thread = None
 def _run_uvicorn(host: str, port: int):
     """在当前线程中运行 uvicorn (阻塞)。"""
     global _server
-    import uvicorn
 
-    if sys.platform == "win32":
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    try:
+        import uvicorn
+        from app.main import app as asgi_app
 
-    config = uvicorn.Config(
-        "app.main:app",
-        host=host,
-        port=port,
-        log_level="info",
-        access_log=False,
-    )
-    _server = uvicorn.Server(config)
-    _server.run()
+        if sys.platform == "win32":
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        config = uvicorn.Config(
+            app=asgi_app,
+            host=host,
+            port=port,
+            log_level="info",
+            access_log=False,
+        )
+        _server = uvicorn.Server(config)
+        _server.run()
+    except Exception:
+        import traceback
+        logging.getLogger("launcher").error(
+            "uvicorn 启动失败:\n%s", traceback.format_exc()
+        )
 
 
 # ============================================================
@@ -248,6 +262,7 @@ class MainWindow(QMainWindow):
         self._health_thread = HealthCheckThread(HEALTH_URL, HEALTH_CHECK_INTERVAL_MS)
         self._health_thread.health_ok.connect(self._on_health_ok)
         self._health_thread.health_failed.connect(self._on_health_failed)
+        self._health_thread.health_timeout.connect(self._on_health_timeout)
         self._health_thread.start()
 
         self._statusbar.showMessage("正在等待服务就绪...")
@@ -263,6 +278,12 @@ class MainWindow(QMainWindow):
             self._startup_timer_count += 1
             if self._startup_timer_count % 5 == 0:
                 self._statusbar.showMessage(f"等待服务就绪... ({reason})")
+
+    def _on_health_timeout(self):
+        if self._state == ServiceState.STARTING:
+            self._log("错误: 服务启动超时 (60秒)，请检查日志中的错误信息")
+            self._update_ui_state(ServiceState.ERROR)
+            self._statusbar.showMessage("服务启动超时")
 
     # --------------------------------------------------------
     # 停止服务
