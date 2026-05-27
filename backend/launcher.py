@@ -126,7 +126,6 @@ def _run_uvicorn(host: str, port: int):
 
     _fix_none_streams()
     _server_error = ""
-    loop = None
 
     try:
         import uvicorn
@@ -135,7 +134,6 @@ def _run_uvicorn(host: str, port: int):
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-        # 手动创建事件循环, 避免 asyncio.run() 在某些环境下失败
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -148,23 +146,23 @@ def _run_uvicorn(host: str, port: int):
         )
         _server = uvicorn.Server(config)
 
+        # 定时检查 should_exit 标志 (从主线程设置)
+        def _watchdog():
+            if _server and _server.should_exit:
+                log.info("收到停止信号，正在关闭...")
+                return
+            loop.call_later(0.5, _watchdog)
+
+        loop.call_later(0.5, _watchdog)
+
         log.info("正在启动 uvicorn 服务 (%s:%d)...", host, port)
         loop.run_until_complete(_server.serve())
-        if not getattr(_server, "should_exit", False):
-            _server_error = "uvicorn 服务在就绪前退出，请查看上方日志"
-            log.error(_server_error)
-        else:
-            log.info("uvicorn 服务已停止")
+        log.info("uvicorn 服务已停止")
+
     except BaseException:
         import traceback
         _server_error = traceback.format_exc()
         log.error("uvicorn 启动失败:\n%s", _server_error)
-    finally:
-        if loop is not None:
-            try:
-                loop.close()
-            except Exception:
-                pass
 
 
 # ============================================================
@@ -361,11 +359,14 @@ class MainWindow(QMainWindow):
         # 通知 uvicorn 退出
         _server.should_exit = True
 
-        # 等待线程结束
+        # 在后台等待线程结束，避免阻塞 UI
         def _wait_stop():
             global _server
             if _server_thread and _server_thread.is_alive():
-                _server_thread.join(timeout=8)
+                _emitter.log_received.emit("等待服务关闭...")
+                _server_thread.join(timeout=10)
+                if _server_thread.is_alive():
+                    _emitter.log_received.emit("服务未响应，强制结束")
             _server = None
             QTimer.singleShot(0, lambda: self._on_stopped())
 
