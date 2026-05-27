@@ -124,18 +124,27 @@ class WindowsKeyExtractor(BaseKeyExtractor):
     def find_wechat_process(self) -> Optional[int]:
         """查找 WeChat.exe 进程，返回 PID 或 None。"""
         logger.info("正在查找 WeChat.exe 进程...")
+        wechat_names = ["wechat.exe", "weixin.exe", "wechatapp.exe"]
+        found_names = []
         try:
             for proc in psutil.process_iter(["pid", "name"]):
-                if proc.info["name"] and proc.info["name"].lower() == "wechat.exe":
+                pname = (proc.info["name"] or "").lower()
+                # 收集所有可能是微信的进程名
+                if "wechat" in pname or "weixin" in pname or "tencent" in pname:
+                    found_names.append(f"{proc.info['name']} (PID: {proc.info['pid']})")
+                if pname in wechat_names:
                     pid: int = proc.info["pid"]
-                    logger.info(f"找到 WeChat.exe 进程，PID: {pid}")
+                    logger.info(f"找到微信进程: {proc.info['name']} PID: {pid}")
                     return pid
         except psutil.NoSuchProcess:
             pass
         except Exception as exc:
             logger.error(f"查找 WeChat 进程时出错: {exc}")
 
-        logger.warning("未找到正在运行的 WeChat.exe 进程")
+        if found_names:
+            logger.warning(f"未匹配到已知微信进程名，但发现以下相关进程: {found_names}")
+        else:
+            logger.warning("未找到任何微信相关进程，请确认微信已启动")
         return None
 
     def scan_memory_for_keys(self, pid: int) -> dict[str, str]:
