@@ -44,8 +44,9 @@ class ServiceState(Enum):
 # 日志桥接: Python logging -> PyQt 信号
 # ============================================================
 class LogSignalEmitter(QObject):
-    """跨线程日志信号发射器。"""
+    """跨线程信号发射器。"""
     log_received = pyqtSignal(str)
+    server_stopped = pyqtSignal()
 
 
 _emitter = LogSignalEmitter()
@@ -149,7 +150,6 @@ def _run_uvicorn(host: str, port: int):
         # 定时检查 should_exit 标志 (从主线程设置)
         def _watchdog():
             if _server and _server.should_exit:
-                log.info("收到停止信号，正在关闭...")
                 return
             loop.call_later(0.5, _watchdog)
 
@@ -157,12 +157,33 @@ def _run_uvicorn(host: str, port: int):
 
         log.info("正在启动 uvicorn 服务 (%s:%d)...", host, port)
         loop.run_until_complete(_server.serve())
+
+        # 清理事件循环中的残留任务
+        _cleanup_loop(loop)
+
         log.info("uvicorn 服务已停止")
 
     except BaseException:
         import traceback
         _server_error = traceback.format_exc()
         log.error("uvicorn 启动失败:\n%s", _server_error)
+
+
+def _cleanup_loop(loop: asyncio.AbstractEventLoop):
+    """清理事件循环中的所有待处理任务。"""
+    try:
+        pending = asyncio.all_tasks(loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    except Exception:
+        pass
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -176,8 +197,9 @@ class MainWindow(QMainWindow):
         self._state = ServiceState.STOPPED
         self._startup_timer_count = 0
 
-        # 连接日志信号
+        # 连接信号
         _emitter.log_received.connect(self._append_log)
+        _emitter.server_stopped.connect(self._on_stopped)
 
         self._init_ui()
         self._update_ui_state(ServiceState.STOPPED)
@@ -364,11 +386,9 @@ class MainWindow(QMainWindow):
             global _server
             if _server_thread and _server_thread.is_alive():
                 _emitter.log_received.emit("等待服务关闭...")
-                _server_thread.join(timeout=10)
-                if _server_thread.is_alive():
-                    _emitter.log_received.emit("服务未响应，强制结束")
+                _server_thread.join(timeout=15)
             _server = None
-            QTimer.singleShot(0, lambda: self._on_stopped())
+            _emitter.server_stopped.emit()
 
         threading.Thread(target=_wait_stop, daemon=True).start()
 
