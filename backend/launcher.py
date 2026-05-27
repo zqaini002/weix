@@ -109,25 +109,21 @@ _server = None
 _server_thread = None
 
 
-class _NullStream:
-    """PyInstaller --windowed 模式下 sys.stdout/stderr 为 None 的替代品。"""
-    def write(self, *a, **kw): pass
-    def flush(self): pass
-    def isatty(self): return False
-    def fileno(self): raise OSError("no fileno")
-    def readable(self): return False
-    def writable(self): return True
+def _fix_none_streams():
+    """PyInstaller --windowed 模式下 sys.stdout/stderr 为 None, 需要修复。"""
+    import io
+    if sys.stdout is None:
+        sys.stdout = io.StringIO()
+    if sys.stderr is None:
+        sys.stderr = io.StringIO()
 
 
 def _run_uvicorn(host: str, port: int):
     """在当前线程中运行 uvicorn (阻塞)。"""
     global _server
+    log = logging.getLogger("launcher")
 
-    # PyInstaller --windowed 模式下 stdout/stderr 为 None, uvicorn 会崩溃
-    if sys.stdout is None:
-        sys.stdout = _NullStream()
-    if sys.stderr is None:
-        sys.stderr = _NullStream()
+    _fix_none_streams()
 
     try:
         import uvicorn
@@ -135,6 +131,10 @@ def _run_uvicorn(host: str, port: int):
 
         if sys.platform == "win32":
             asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+        # 手动创建事件循环, 避免 asyncio.run() 在某些环境下失败
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
         config = uvicorn.Config(
             app=asgi_app,
@@ -144,12 +144,13 @@ def _run_uvicorn(host: str, port: int):
             access_log=False,
         )
         _server = uvicorn.Server(config)
-        _server.run()
+
+        log.info("正在启动 uvicorn 服务 (%s:%d)...", host, port)
+        loop.run_until_complete(_server.serve())
+        log.info("uvicorn 服务已停止")
     except Exception:
         import traceback
-        logging.getLogger("launcher").error(
-            "uvicorn 启动失败:\n%s", traceback.format_exc()
-        )
+        log.error("uvicorn 启动失败:\n%s", traceback.format_exc())
 
 
 # ============================================================
@@ -260,10 +261,7 @@ class MainWindow(QMainWindow):
         self._update_ui_state(ServiceState.STARTING)
 
         # PyInstaller --windowed: stdout/stderr 可能为 None
-        if sys.stdout is None:
-            sys.stdout = _NullStream()
-        if sys.stderr is None:
-            sys.stderr = _NullStream()
+        _fix_none_streams()
 
         # 安装日志桥接 handler (捕获 uvicorn + app 的日志)
         handler = QtLogHandler()
