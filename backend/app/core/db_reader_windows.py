@@ -43,10 +43,13 @@ class WindowsDBReader(BaseDBReader):
     在每个查询中按需解密所需页面，避免全量解密。
     """
 
-    # Windows 微信数据目录（常见路径）
+    # Windows 微信数据目录（常见路径，运行时会动态补充注册表和进程路径）
     WINDOWS_DATA_DIRS: ClassVar[list[str]] = [
         os.path.expandvars(r"%USERPROFILE%\Documents\WeChat Files"),
         os.path.expandvars(r"%APPDATA%\Tencent\WeChat"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Tencent\WeChat"),
+        r"D:\WeChat Files",
+        r"E:\WeChat Files",
     ]
 
     def __init__(self):

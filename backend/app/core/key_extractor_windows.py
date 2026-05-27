@@ -16,6 +16,7 @@ from typing import Optional
 import psutil
 
 from app.core.base import BaseKeyExtractor
+from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,7 @@ class WindowsKeyExtractor(BaseKeyExtractor):
         self._kernel32 = ctypes.windll.kernel32
         self._setup_ctypes()
         self._keys: dict[str, str] = {}
-        self._all_keys_file = Path("data/all_keys.json")
+        self._all_keys_file = get_data_dir() / "all_keys.json"
 
     def _setup_ctypes(self):
         """配置 ctypes 函数签名，防止 64 位系统指针截断。"""
@@ -391,13 +392,118 @@ class WindowsKeyExtractor(BaseKeyExtractor):
         return None
 
     def _find_wechat_data_dir(self) -> Optional[str]:
-        """查找微信数据根目录。"""
-        userprofile = os.getenv("USERPROFILE", "")
-        if not userprofile:
-            return None
+        """查找微信数据根目录。按优先级扫描多个常见位置。"""
+        candidates = []
 
-        base = os.path.join(userprofile, "Documents", "WeChat Files")
-        return base if os.path.exists(base) else None
+        # 1. 从注册表读取微信安装路径，推导数据目录
+        reg_install = self._read_wechat_install_path_from_registry()
+        if reg_install:
+            logger.info(f"注册表微信安装路径: {reg_install}")
+            # 新版微信数据默认在安装目录同级的 WeChat Files
+            parent = os.path.dirname(reg_install)
+            candidates.append(os.path.join(parent, "WeChat Files"))
+
+        # 2. 从正在运行的微信进程获取 exe 路径
+        proc_path = self._get_wechat_exe_path()
+        if proc_path:
+            logger.info(f"微信进程路径: {proc_path}")
+            parent = os.path.dirname(proc_path)
+            candidates.append(os.path.join(parent, "WeChat Files"))
+
+        # 3. 常见数据目录
+        userprofile = os.getenv("USERPROFILE", "")
+        appdata = os.getenv("APPDATA", "")
+        localappdata = os.getenv("LOCALAPPDATA", "")
+
+        candidates.extend([
+            os.path.join(userprofile, "Documents", "WeChat Files") if userprofile else "",
+            os.path.join(appdata, "Tencent", "WeChat") if appdata else "",
+            os.path.join(localappdata, "Tencent", "WeChat") if localappdata else "",
+            # 自定义安装常见位置
+            r"D:\WeChat Files",
+            r"E:\WeChat Files",
+            r"D:\Tencent\WeChat",
+            r"E:\Tencent\WeChat",
+        ])
+
+        # 4. 遍历所有本地磁盘根目录查找
+        for drive in self._get_available_drives():
+            candidates.append(os.path.join(drive, "WeChat Files"))
+            candidates.append(os.path.join(drive, "Tencent", "WeChat"))
+
+        # 去重并按优先级检查
+        seen = set()
+        for path in candidates:
+            if not path:
+                continue
+            path = os.path.normpath(path)
+            if path in seen:
+                continue
+            seen.add(path)
+            if os.path.exists(path):
+                logger.info(f"找到微信数据目录: {path}")
+                return path
+
+        logger.warning("未找到微信数据目录")
+        return None
+
+    def _read_wechat_install_path_from_registry(self) -> Optional[str]:
+        """从 Windows 注册表读取微信安装路径。"""
+        try:
+            import winreg
+            # 微信安装信息通常在这里
+            reg_paths = [
+                (winreg.HKEY_CURRENT_USER, r"Software\Tencent\WeChat"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\Tencent\WeChat"),
+                (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Tencent\WeChat"),
+                (winreg.HKEY_CURRENT_USER, r"Software\WOW6432Node\Tencent\WeChat"),
+            ]
+            for hkey, subkey in reg_paths:
+                try:
+                    with winreg.OpenKey(hkey, subkey) as key:
+                        # 尝试 InstallPath
+                        try:
+                            val, _ = winreg.QueryValueEx(key, "InstallPath")
+                            if val and os.path.exists(val):
+                                return val
+                        except FileNotFoundError:
+                            pass
+                        # 尝试默认值
+                        try:
+                            val, _ = winreg.QueryValueEx(key, "")
+                            if val and os.path.exists(val):
+                                return val
+                        except FileNotFoundError:
+                            pass
+                except FileNotFoundError:
+                    continue
+        except ImportError:
+            logger.debug("winreg 模块不可用")
+        except Exception as exc:
+            logger.debug(f"读取注册表失败: {exc}")
+        return None
+
+    def _get_wechat_exe_path(self) -> Optional[str]:
+        """从正在运行的微信进程获取 exe 完整路径。"""
+        try:
+            for proc in psutil.process_iter(["pid", "name", "exe"]):
+                if proc.info["name"] and proc.info["name"].lower() == "wechat.exe":
+                    exe_path = proc.info.get("exe")
+                    if exe_path and os.path.exists(exe_path):
+                        return exe_path
+        except Exception as exc:
+            logger.debug(f"获取微信进程路径失败: {exc}")
+        return None
+
+    @staticmethod
+    def _get_available_drives() -> list[str]:
+        """获取所有可用的本地磁盘盘符。"""
+        drives = []
+        for letter in "CDEFGHIJKLMNOPQRSTUVWXYZ":
+            drive = f"{letter}:\\"
+            if os.path.exists(drive):
+                drives.append(drive)
+        return drives
 
     def _save_keys(self) -> None:
         """持久化密钥到 JSON 文件。"""
