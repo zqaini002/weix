@@ -4,7 +4,8 @@ Weix GUI Launcher -- PyQt6 图形化启动器
 """
 import sys
 import os
-import subprocess
+import asyncio
+import logging
 import threading
 import time
 import urllib.request
@@ -16,7 +17,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QTextEdit, QLabel, QStatusBar, QMessageBox
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QObject
 from PyQt6.QtGui import QFont, QTextCursor
 
 
@@ -40,34 +41,29 @@ class ServiceState(Enum):
 
 
 # ============================================================
-# 日志读取线程
+# 日志桥接: Python logging -> PyQt 信号
 # ============================================================
-class LogReaderThread(QThread):
-    """从子进程 stdout 实时读取日志。"""
+class LogSignalEmitter(QObject):
+    """跨线程日志信号发射器。"""
     log_received = pyqtSignal(str)
-    process_exited = pyqtSignal(int)
 
-    def __init__(self, process: subprocess.Popen):
+
+_emitter = LogSignalEmitter()
+
+
+class QtLogHandler(logging.Handler):
+    """将 Python logging 输出转发到 PyQt 信号。"""
+
+    def __init__(self):
         super().__init__()
-        self._process = process
-        self._running = True
+        self.setFormatter(logging.Formatter(
+            "%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
+            datefmt="%H:%M:%S",
+        ))
 
-    def run(self):
-        try:
-            for line in iter(self._process.stdout.readline, ''):
-                if not self._running:
-                    break
-                if line:
-                    self.log_received.emit(line.rstrip('\n\r'))
-        except Exception:
-            pass
-        finally:
-            if self._process:
-                retcode = self._process.wait()
-                self.process_exited.emit(retcode)
-
-    def stop(self):
-        self._running = False
+    def emit(self, record):
+        msg = self.format(record)
+        _emitter.log_received.emit(msg)
 
 
 # ============================================================
@@ -101,17 +97,44 @@ class HealthCheckThread(QThread):
 
 
 # ============================================================
+# Uvicorn 服务管理
+# ============================================================
+_server = None
+_server_thread = None
+
+
+def _run_uvicorn(host: str, port: int):
+    """在当前线程中运行 uvicorn (阻塞)。"""
+    global _server
+    import uvicorn
+
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    config = uvicorn.Config(
+        "app.main:app",
+        host=host,
+        port=port,
+        log_level="info",
+        access_log=False,
+    )
+    _server = uvicorn.Server(config)
+    _server.run()
+
+
+# ============================================================
 # 主窗口
 # ============================================================
 class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self._process: subprocess.Popen | None = None
-        self._log_thread: LogReaderThread | None = None
         self._health_thread: HealthCheckThread | None = None
         self._state = ServiceState.STOPPED
         self._startup_timer_count = 0
+
+        # 连接日志信号
+        _emitter.log_received.connect(self._append_log)
 
         self._init_ui()
         self._update_ui_state(ServiceState.STOPPED)
@@ -180,10 +203,10 @@ class MainWindow(QMainWindow):
     def _update_ui_state(self, state: ServiceState):
         self._state = state
         state_map = {
-            ServiceState.STOPPED:  ("已停止",   "#888888", True,  False, False),
+            ServiceState.STOPPED:  ("已停止",    "#888888", True,  False, False),
             ServiceState.STARTING: ("启动中...", "#f0ad4e", False, True,  False),
-            ServiceState.RUNNING:  ("运行中",   "#5cb85c", False, True,  True),
-            ServiceState.ERROR:    ("错误",     "#d9534f", True,  False, False),
+            ServiceState.RUNNING:  ("运行中",    "#5cb85c", False, True,  True),
+            ServiceState.ERROR:    ("错误",      "#d9534f", True,  False, False),
             ServiceState.STOPPING: ("停止中...", "#f0ad4e", False, False, False),
         }
         text, color, start_en, stop_en, browser_en = state_map[state]
@@ -196,66 +219,38 @@ class MainWindow(QMainWindow):
         self._btn_browser.setEnabled(browser_en)
 
     # --------------------------------------------------------
-    # 启动服务
+    # 启动服务 (进程内)
     # --------------------------------------------------------
     def _on_start(self):
+        global _server_thread
+
         self._log_text.clear()
         self._startup_timer_count = 0
         self._log("正在启动 Weix 服务...")
         self._update_ui_state(ServiceState.STARTING)
 
-        if getattr(sys, 'frozen', False):
-            # 打包后: 用 launcher 同目录的 python 子进程启动 uvicorn
-            exe_dir = Path(sys.executable).parent
-            cmd = [
-                sys.executable, "-m", "uvicorn",
-                "app.main:app",
-                "--host", SERVER_HOST,
-                "--port", str(SERVER_PORT),
-            ]
-            cwd = str(exe_dir)
-        else:
-            # 开发环境
-            cmd = [
-                sys.executable, "-m", "uvicorn",
-                "app.main:app",
-                "--host", SERVER_HOST,
-                "--port", str(SERVER_PORT),
-            ]
-            cwd = str(Path(__file__).parent)
+        # 安装日志桥接 handler (捕获 uvicorn + app 的日志)
+        handler = QtLogHandler()
+        handler.setLevel(logging.DEBUG)
+        logging.getLogger().addHandler(handler)
+        # 降低 uvicorn 日志级别以便看到更多信息
+        logging.getLogger("uvicorn").setLevel(logging.INFO)
 
-        self._log(f"工作目录: {cwd}")
-        self._log(f"启动命令: {' '.join(cmd)}")
+        # 在守护线程中启动 uvicorn
+        _server_thread = threading.Thread(
+            target=_run_uvicorn,
+            args=(SERVER_HOST, SERVER_PORT),
+            daemon=True,
+        )
+        _server_thread.start()
 
-        try:
-            creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == 'win32' else 0
-            self._process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding='utf-8',
-                errors='replace',
-                bufsize=1,
-                cwd=cwd,
-                creationflags=creation_flags,
-            )
+        # 启动健康检查
+        self._health_thread = HealthCheckThread(HEALTH_URL, HEALTH_CHECK_INTERVAL_MS)
+        self._health_thread.health_ok.connect(self._on_health_ok)
+        self._health_thread.health_failed.connect(self._on_health_failed)
+        self._health_thread.start()
 
-            self._log_thread = LogReaderThread(self._process)
-            self._log_thread.log_received.connect(self._log)
-            self._log_thread.process_exited.connect(self._on_process_exited)
-            self._log_thread.start()
-
-            self._health_thread = HealthCheckThread(HEALTH_URL, HEALTH_CHECK_INTERVAL_MS)
-            self._health_thread.health_ok.connect(self._on_health_ok)
-            self._health_thread.health_failed.connect(self._on_health_failed)
-            self._health_thread.start()
-
-            self._statusbar.showMessage("正在等待服务就绪...")
-
-        except Exception as e:
-            self._log(f"启动异常: {e}")
-            self._update_ui_state(ServiceState.ERROR)
+        self._statusbar.showMessage("正在等待服务就绪...")
 
     def _on_health_ok(self):
         self._update_ui_state(ServiceState.RUNNING)
@@ -273,7 +268,9 @@ class MainWindow(QMainWindow):
     # 停止服务
     # --------------------------------------------------------
     def _on_stop(self):
-        if self._process is None:
+        global _server
+
+        if _server is None:
             return
 
         self._update_ui_state(ServiceState.STOPPING)
@@ -283,34 +280,23 @@ class MainWindow(QMainWindow):
         if self._health_thread:
             self._health_thread.stop()
 
-        try:
-            self._process.terminate()
-        except Exception:
-            pass
+        # 通知 uvicorn 退出
+        _server.should_exit = True
 
-        try:
-            self._process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._log("进程未响应，强制终止")
-            self._process.kill()
-            self._process.wait()
+        # 等待线程结束
+        def _wait_stop():
+            global _server
+            if _server_thread and _server_thread.is_alive():
+                _server_thread.join(timeout=8)
+            _server = None
+            QTimer.singleShot(0, lambda: self._on_stopped())
 
-    def _on_process_exited(self, retcode: int):
-        if self._log_thread:
-            self._log_thread.stop()
+        threading.Thread(target=_wait_stop, daemon=True).start()
 
-        if self._state == ServiceState.STOPPING:
-            self._log(f"服务已停止 (退出码: {retcode})")
-            self._update_ui_state(ServiceState.STOPPED)
-            self._statusbar.showMessage("服务已停止")
-        elif retcode != 0:
-            self._log(f"服务异常退出 (退出码: {retcode})")
-            self._update_ui_state(ServiceState.ERROR)
-            self._statusbar.showMessage(f"服务异常退出 (退出码: {retcode})")
-        else:
-            self._update_ui_state(ServiceState.STOPPED)
-
-        self._process = None
+    def _on_stopped(self):
+        self._update_ui_state(ServiceState.STOPPED)
+        self._statusbar.showMessage("服务已停止")
+        self._log("服务已停止")
 
     # --------------------------------------------------------
     # 打开浏览器
@@ -327,11 +313,19 @@ class MainWindow(QMainWindow):
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self._log_text.setTextCursor(cursor)
 
+    def _append_log(self, text: str):
+        """来自 logging handler 的日志 (已在主线程)。"""
+        self._log_text.append(text)
+        cursor = self._log_text.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._log_text.setTextCursor(cursor)
+
     # --------------------------------------------------------
     # 窗口关闭
     # --------------------------------------------------------
     def closeEvent(self, event):
-        if self._process and self._process.poll() is None:
+        global _server
+        if _server and not _server.should_exit:
             reply = QMessageBox.question(
                 self, "确认退出",
                 "服务仍在运行，确定要停止并退出吗？",
@@ -341,7 +335,7 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.No:
                 event.ignore()
                 return
-            self._on_stop()
+            _server.should_exit = True
         event.accept()
 
 
@@ -349,6 +343,10 @@ class MainWindow(QMainWindow):
 # 入口
 # ============================================================
 def main():
+    # PyInstaller 打包后, 切换工作目录到 exe 所在目录
+    if getattr(sys, 'frozen', False):
+        os.chdir(Path(sys.executable).parent)
+
     app = QApplication(sys.argv)
     app.setApplicationName("Weix")
     app.setStyle("Fusion")
