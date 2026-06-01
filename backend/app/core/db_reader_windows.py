@@ -5,6 +5,7 @@
 """
 
 import hashlib
+import hmac as hmac_mod
 import logging
 import os
 import sqlite3
@@ -13,7 +14,6 @@ import tempfile
 import threading
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import ClassVar, Optional
 
 from Crypto.Cipher import AES
@@ -21,13 +21,19 @@ from Crypto.Hash import SHA512
 from Crypto.Protocol.KDF import PBKDF2
 
 from app.core.base import BaseDBReader, WeChatMessage
+from app.core.wechat_paths_windows import find_wechat_data_dirs
 
 logger = logging.getLogger(__name__)
 
 # SQLCipher4 页面大小
 PAGE_SIZE = 4096
-# 页面保留区域大小
-RESERVED_SIZE = 48
+KEY_SIZE = 32
+SALT_SIZE = 16
+IV_SIZE = 16
+HMAC_SIZE = 64
+# SQLCipher4 HMAC-SHA512: IV(16) + HMAC(64)
+RESERVED_SIZE = 80
+SQLITE_HEADER = b"SQLite format 3\x00"
 # 消息类型常量
 MSG_TYPE_TEXT = 1
 MSG_TYPE_IMAGE = 3
@@ -46,10 +52,17 @@ class WindowsDBReader(BaseDBReader):
     # Windows 微信数据目录（常见路径，运行时会动态补充注册表和进程路径）
     WINDOWS_DATA_DIRS: ClassVar[list[str]] = [
         os.path.expandvars(r"%USERPROFILE%\Documents\WeChat Files"),
+        os.path.expandvars(r"%USERPROFILE%\Documents\xwechat_files"),
         os.path.expandvars(r"%APPDATA%\Tencent\WeChat"),
+        os.path.expandvars(r"%APPDATA%\Tencent\WeChat\WeChat Files"),
+        os.path.expandvars(r"%APPDATA%\Tencent\WeChat\xwechat_files"),
         os.path.expandvars(r"%LOCALAPPDATA%\Tencent\WeChat"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Tencent\WeChat\WeChat Files"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Tencent\WeChat\xwechat_files"),
         r"D:\WeChat Files",
+        r"D:\xwechat_files",
         r"E:\WeChat Files",
+        r"E:\xwechat_files",
     ]
 
     def __init__(self):
@@ -60,7 +73,11 @@ class WindowsDBReader(BaseDBReader):
         self._sqlite_conn: Optional[sqlite3.Connection] = None
         self._decrypted_path: str = ""
         self._iterations: int = 256000
+        self._reserve_size: int = RESERVED_SIZE
+        self._hmac_hash: str = "sha512"
+        self._key_mode: str = ""
         self._lock = threading.Lock()
+        self._msg_table_cache: Optional[list[tuple[str, str]]] = None
 
     # --- 公共接口 ---
 
@@ -114,6 +131,9 @@ class WindowsDBReader(BaseDBReader):
         if self._sqlite_conn is None:
             logger.error("数据库未打开")
             return []
+
+        if self._has_msg_shard_tables():
+            return self._query_v4_messages_since(timestamp)
 
         try:
             cursor = self._sqlite_conn.execute(
@@ -179,6 +199,72 @@ class WindowsDBReader(BaseDBReader):
             logger.error(f"查询消息失败: {exc}")
             return []
 
+    def _query_v4_messages_since(self, timestamp: int) -> list[WeChatMessage]:
+        """查询 Windows Weixin 4.x Msg_<md5> 分表消息。"""
+        if self._sqlite_conn is None:
+            return []
+
+        ts_sec = timestamp // 1000 if timestamp > 10000000000 else timestamp
+        try:
+            msg_tables = self._get_v4_msg_tables()
+            messages: list[WeChatMessage] = []
+            scanned = 0
+
+            for table, username in msg_tables:
+                try:
+                    cursor = self._sqlite_conn.execute(
+                        f'SELECT local_id, create_time, real_sender_id, '
+                        f'message_content, local_type, source, '
+                        f'status, origin_source, server_seq '
+                        f'FROM "{table}" '
+                        f'WHERE create_time > ? '
+                        f'ORDER BY create_time ASC',
+                        (ts_sec,),
+                    )
+                except Exception:
+                    continue
+
+                for row in cursor:
+                    scanned += 1
+                    if self._is_self_sent_v4_row(row):
+                        continue
+                    local_type = row["local_type"] or 0
+                    if local_type != MSG_TYPE_TEXT:
+                        continue
+
+                    content = self._decode_message_content(row["message_content"])
+                    if not content.strip() or self._is_garbled(content):
+                        continue
+
+                    is_group = "@chatroom" in username
+                    sender = username
+                    if is_group:
+                        sender = self._parse_group_sender(row["source"], username)
+
+                    messages.append(
+                        WeChatMessage(
+                            msg_id=f"{table}:{row['local_id']}",
+                            msg_type=local_type,
+                            content=content,
+                            sender=sender,
+                            room_id=username if is_group else "",
+                            create_time=datetime.fromtimestamp(row["create_time"] or 0),
+                            is_group=is_group,
+                            at_list=[],
+                        )
+                    )
+
+            messages.sort(key=lambda msg: msg.create_time or datetime.min)
+            if messages:
+                logger.info(
+                    f"检测到 {len(messages)} 条 Windows 4.x 新文本消息 "
+                    f"(扫描 {len(msg_tables)} 个表, 命中 {scanned} 行)"
+                )
+            return messages
+        except Exception as exc:
+            logger.error(f"查询 Windows 4.x 消息失败: {exc}")
+            return []
+
     def get_contacts(self) -> list[dict]:
         """获取联系人列表。
 
@@ -190,6 +276,9 @@ class WindowsDBReader(BaseDBReader):
             return []
 
         try:
+            if self._is_v4_contact_schema():
+                return self._get_contacts_v4()
+
             cursor = self._sqlite_conn.execute(
                 """
                 SELECT UserName, Alias, NickName, Remark, Type,
@@ -220,6 +309,32 @@ class WindowsDBReader(BaseDBReader):
             logger.error(f"获取联系人失败: {exc}")
             return []
 
+    def _get_contacts_v4(self) -> list[dict]:
+        """微信 4.x schema: contact 表，小写列名。"""
+        cursor = self._sqlite_conn.execute(
+            """
+            SELECT username, alias, nick_name, remark, local_type,
+                   big_head_url, small_head_url, chat_room_type
+            FROM contact
+            WHERE username != '' AND delete_flag = 0
+            ORDER BY nick_name
+            """
+        )
+        contacts: list[dict] = []
+        for row in cursor:
+            contact = {
+                "wxid": row["username"] or "",
+                "alias": row["alias"] or "",
+                "nickname": row["nick_name"] or "",
+                "remark": row["remark"] or "",
+                "type": row["local_type"] or 0,
+                "head_img_url": row["big_head_url"] or row["small_head_url"] or "",
+                "chatroom_type": row["chat_room_type"] or 0,
+            }
+            contacts.append(contact)
+        logger.debug(f"获取到 {len(contacts)} 个联系人 (V4 schema)")
+        return contacts
+
     def get_chatrooms(self) -> list[dict]:
         """获取群聊列表。
 
@@ -231,6 +346,9 @@ class WindowsDBReader(BaseDBReader):
             return []
 
         try:
+            if self._is_v4_contact_schema():
+                return self._get_chatrooms_v4()
+
             cursor = self._sqlite_conn.execute(
                 """
                 SELECT ChatRoomName, UserNameList, DisplayNameList,
@@ -257,6 +375,64 @@ class WindowsDBReader(BaseDBReader):
         except Exception as exc:
             logger.error(f"获取群聊列表失败: {exc}")
             return []
+
+    def _get_chatrooms_v4(self) -> list[dict]:
+        """微信 4.x schema: chat_room + chatroom_member + contact。"""
+        rooms: list[dict] = []
+        room_rows = self._sqlite_conn.execute(
+            "SELECT id, username, owner FROM chat_room WHERE username != ''"
+        ).fetchall()
+
+        for rr in room_rows:
+            room_id = rr["username"] or ""
+            room_pk = rr["id"]
+            owner = rr["owner"] or ""
+            if not room_id:
+                continue
+
+            member_count = self._sqlite_conn.execute(
+                "SELECT COUNT(*) FROM chatroom_member WHERE room_id = ?",
+                (room_pk,),
+            ).fetchone()[0]
+
+            # 群名来源：contact 表的 nick_name（群主设置的真实群名）
+            name = ""
+            contact_row = self._sqlite_conn.execute(
+                "SELECT nick_name, remark FROM contact WHERE username = ?",
+                (room_id,),
+            ).fetchone()
+            if contact_row:
+                name = contact_row["nick_name"] or contact_row["remark"] or ""
+
+            # 没有群名时用前几个成员昵称拼凑
+            if not name:
+                member_names = self._sqlite_conn.execute(
+                    """
+                    SELECT c.nick_name
+                    FROM chatroom_member cm
+                    JOIN contact c ON c.id = cm.member_id
+                    WHERE cm.room_id = ?
+                    LIMIT 5
+                    """,
+                    (room_pk,),
+                ).fetchall()
+                names = [m["nick_name"] for m in member_names if m["nick_name"]]
+                if names:
+                    name = "、".join(names[:5])
+                    if member_count > 5:
+                        name += f"...({member_count}人)"
+
+            rooms.append({
+                "room_id": room_id,
+                "members": [],
+                "display_names": [],
+                "owner": owner,
+                "member_count": member_count,
+                "name": name,
+            })
+
+        logger.debug(f"获取到 {len(rooms)} 个群聊 (V4 schema)")
+        return rooms
 
     def close(self) -> None:
         """关闭数据库连接并清理临时文件。"""
@@ -290,16 +466,28 @@ class WindowsDBReader(BaseDBReader):
     # --- 平台通用方法 ---
 
     def is_message_db(self) -> bool:
-        """验证当前打开的数据库是否包含消息表（MSG 表）。"""
+        """验证当前打开的数据库是否包含消息表（MSG 或 Msg_% 表）。"""
         if self._sqlite_conn is None:
             return False
         try:
             cursor = self._sqlite_conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE type='table' AND name='MSG'"
+                "WHERE type='table' AND (name='MSG' OR name LIKE 'Msg_%')"
             )
             count = cursor.fetchone()[0]
             return count > 0
+        except Exception:
+            return False
+
+    def _is_v4_contact_schema(self) -> bool:
+        """检测是否为微信 4.x 联系人 schema（小写表名）。"""
+        if self._sqlite_conn is None:
+            return False
+        try:
+            cursor = self._sqlite_conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='contact'"
+            )
+            return cursor.fetchone() is not None
         except Exception:
             return False
 
@@ -310,7 +498,7 @@ class WindowsDBReader(BaseDBReader):
         try:
             cursor = self._sqlite_conn.execute(
                 "SELECT COUNT(*) FROM sqlite_master "
-                "WHERE type='table' AND name IN ('Contact', 'ChatRoom')"
+                "WHERE type='table' AND name IN ('Contact', 'ChatRoom', 'contact', 'chat_room')"
             )
             count = cursor.fetchone()[0]
             return count >= 1
@@ -323,13 +511,16 @@ class WindowsDBReader(BaseDBReader):
 
         通过扫描微信数据目录中 wxid_ 开头的文件夹获取。
         """
-        for base_dir in cls.WINDOWS_DATA_DIRS:
-            expanded = os.path.expandvars(base_dir)
-            if not os.path.exists(expanded):
-                continue
+        for expanded in cls._get_data_dirs():
             try:
                 for entry in os.scandir(expanded):
-                    if entry.is_dir() and entry.name.startswith("wxid_"):
+                    if not entry.is_dir():
+                        continue
+                    if entry.name.startswith("wxid_"):
+                        return entry.name
+                    if os.path.isdir(os.path.join(entry.path, "db_storage")):
+                        return entry.name
+                    if os.path.isdir(os.path.join(entry.path, "Msg")):
                         return entry.name
             except OSError:
                 continue
@@ -339,37 +530,59 @@ class WindowsDBReader(BaseDBReader):
     def find_database_files(cls, wxid: str = "") -> list[str]:
         """查找 Windows 上指定 wxid 的所有 .db 数据库文件。
 
-        目录结构: WeChat Files/<wxid>/Msg/ 下有 Multiple/ 子目录，
-        每个子目录包含 MSG.db、Contact.db 等。
+        支持两种目录结构:
+        - WeChat Files/<wxid>/Msg/...
+        - xwechat_files/<wxid>/db_storage/<category>/<db>.db
         """
         db_files: list[str] = []
 
-        for base_dir in cls.WINDOWS_DATA_DIRS:
-            expanded = os.path.expandvars(base_dir)
-            if not os.path.exists(expanded):
-                continue
-
+        for expanded in cls._get_data_dirs():
             try:
                 for wxid_entry in os.scandir(expanded):
                     if not wxid_entry.is_dir():
                         continue
-                    if not wxid_entry.name.startswith("wxid_"):
-                        continue
                     if wxid and wxid_entry.name != wxid:
                         continue
 
-                    msg_dir = os.path.join(wxid_entry.path, "Msg")
-                    if not os.path.isdir(msg_dir):
+                    storage = os.path.join(wxid_entry.path, "db_storage")
+                    if os.path.isdir(storage):
+                        for root, _dirs, files in os.walk(storage):
+                            for fname in files:
+                                if fname.endswith(".db"):
+                                    db_files.append(os.path.join(root, fname))
                         continue
 
-                    for root, _dirs, files in os.walk(msg_dir):
-                        for fname in files:
-                            if fname.endswith(".db"):
-                                db_files.append(os.path.join(root, fname))
+                    msg_dir = os.path.join(wxid_entry.path, "Msg")
+                    if os.path.isdir(msg_dir):
+                        for root, _dirs, files in os.walk(msg_dir):
+                            for fname in files:
+                                if fname.endswith(".db"):
+                                    db_files.append(os.path.join(root, fname))
             except OSError:
                 continue
 
         return db_files
+
+    @classmethod
+    def _get_data_dirs(cls) -> list[str]:
+        """Return discovered Windows WeChat data roots plus legacy fallbacks."""
+        discovered = [item.path for item in find_wechat_data_dirs()]
+        candidates = discovered + [
+            os.path.expandvars(path) for path in cls.WINDOWS_DATA_DIRS
+        ]
+
+        data_dirs: list[str] = []
+        seen: set[str] = set()
+        for path in candidates:
+            if not path:
+                continue
+            norm = os.path.normpath(path)
+            key = os.path.normcase(norm)
+            if key in seen or not os.path.isdir(norm):
+                continue
+            seen.add(key)
+            data_dirs.append(norm)
+        return data_dirs
 
     @classmethod
     def cleanup_temp_files(cls, stale_seconds: int = 600) -> int:
@@ -418,6 +631,9 @@ class WindowsDBReader(BaseDBReader):
             logger.error("数据库未打开")
             return []
 
+        if self._has_msg_shard_tables():
+            return self._get_my_v4_messages(limit=limit, since_days=since_days)
+
         since_ts = int(time.time()) - since_days * 86400
 
         try:
@@ -463,12 +679,177 @@ class WindowsDBReader(BaseDBReader):
             logger.error(f"提取当前用户消息失败: {exc}")
             return []
 
+    def _get_my_v4_messages(
+        self,
+        limit: int = 5000,
+        since_days: int = 90,
+    ) -> list[dict]:
+        """提取 Windows Weixin 4.x 当前用户发出的文本消息。"""
+        if self._sqlite_conn is None:
+            return []
+
+        since_ts = int(time.time()) - since_days * 86400
+        messages: list[dict] = []
+
+        try:
+            for table, username in self._get_v4_msg_tables():
+                if len(messages) >= limit:
+                    break
+                try:
+                    cursor = self._sqlite_conn.execute(
+                        f'SELECT message_content, create_time, real_sender_id, '
+                        f'status, origin_source, server_seq '
+                        f'FROM "{table}" '
+                        f'WHERE create_time > ? '
+                        f'AND local_type = 1 '
+                        f'ORDER BY create_time DESC '
+                        f'LIMIT ?',
+                        (since_ts, limit - len(messages)),
+                    )
+                except Exception:
+                    continue
+
+                is_group = "@chatroom" in username
+                for row in cursor:
+                    if not self._is_self_sent_v4_row(row):
+                        continue
+                    content = self._decode_message_content(row["message_content"]).strip()
+                    if not content or len(content) < 2 or self._is_garbled(content):
+                        continue
+                    messages.append({
+                        "content": content,
+                        "create_time": row["create_time"],
+                        "room_id": username if is_group else "",
+                        "is_group": is_group,
+                    })
+
+            messages.sort(key=lambda item: item["create_time"])
+            logger.info(f"提取 Windows 4.x 当前用户消息: {len(messages)} 条")
+            return messages
+        except Exception as exc:
+            logger.error(f"提取 Windows 4.x 当前用户消息失败: {exc}")
+            return []
+
     # --- 内部方法 ---
+
+    def _has_msg_shard_tables(self) -> bool:
+        if self._sqlite_conn is None:
+            return False
+        try:
+            row = self._sqlite_conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name LIKE 'Msg_%' LIMIT 1"
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
+
+    def _get_v4_msg_tables(self) -> list[tuple[str, str]]:
+        if self._sqlite_conn is None:
+            return []
+        if self._msg_table_cache is not None:
+            return self._msg_table_cache
+
+        hash_to_user: dict[str, str] = {}
+        try:
+            cursor = self._sqlite_conn.execute("SELECT user_name FROM Name2Id")
+            for row in cursor:
+                username = row["user_name"] or ""
+                if username:
+                    hash_to_user[hashlib.md5(username.encode()).hexdigest()] = username
+        except Exception:
+            pass
+
+        self._msg_table_cache = []
+        cursor = self._sqlite_conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='table' AND name LIKE 'Msg_%'"
+        )
+        for row in cursor:
+            table = row[0]
+            username = hash_to_user.get(table[4:], "")
+            self._msg_table_cache.append((table, username))
+        logger.info(f"Windows 4.x 消息表缓存已构建: {len(self._msg_table_cache)} 个会话表")
+        return self._msg_table_cache
+
+    @staticmethod
+    def _is_self_sent_v4_row(row) -> bool:
+        real_sender_id = row["real_sender_id"] or 0
+        if real_sender_id == 1:
+            return True
+        status = row["status"] or 0
+        origin_source = row["origin_source"] or 0
+        server_seq = row["server_seq"] or 0
+        return status == 2 and origin_source == 1 and server_seq == 0
+
+    @staticmethod
+    def _decode_message_content(content) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, bytes):
+            try:
+                return content.decode("utf-8", errors="replace")
+            except Exception:
+                return str(content)
+        return str(content)
+
+    @staticmethod
+    def _is_garbled(text: str) -> bool:
+        if not text:
+            return True
+        bad = 0
+        for ch in text:
+            code = ord(ch)
+            if code == 0xFFFD or (code < 0x20 and code not in (0x09, 0x0A, 0x0D)):
+                bad += 1
+        return bad / len(text) > 0.3
+
+    @staticmethod
+    def _parse_group_sender(source_blob, fallback: str) -> str:
+        if not source_blob or not isinstance(source_blob, bytes):
+            return fallback
+        try:
+            import re
+
+            text = source_blob.decode("utf-8", errors="replace")
+            match = re.search(r"wxid_[a-z0-9]+", text)
+            if match:
+                return match.group(0)
+            match = re.search(r"\d+@openim", text)
+            if match:
+                return match.group(0)
+        except Exception:
+            pass
+        return fallback
+
+    @staticmethod
+    def _derive_mac_key(enc_key: bytes, salt: bytes, hash_name: str = "sha512") -> bytes:
+        """派生 SQLCipher 4 HMAC 校验密钥。"""
+        mac_salt = bytes(b ^ 0x3A for b in salt)
+        return hashlib.pbkdf2_hmac(hash_name, enc_key, mac_salt, 2, dklen=KEY_SIZE)
+
+    @staticmethod
+    def _looks_like_decrypted_page1(decrypted: bytes) -> bool:
+        """识别 SQLCipher page 1 解密后的常见明文形态。"""
+        return (
+            decrypted[:16] == SQLITE_HEADER
+            or decrypted[:2] == b"\x10\x00"
+        )
+
+    @staticmethod
+    def _rebuild_page1(decrypted: bytes) -> bytes:
+        """把 page 1 解密片段还原成普通 SQLite page。"""
+        if decrypted[:16] == SQLITE_HEADER:
+            padding = b"\x00" * (PAGE_SIZE - len(decrypted))
+            return decrypted + padding
+        return SQLITE_HEADER + decrypted + b"\x00" * RESERVED_SIZE
 
     def _derive_key(self) -> bool:
         """从原始密钥派生 AES 和 HMAC 密钥。
 
-        通过 PBKDF2-HMAC-SHA512 从 page 1 的 salt 派生。
+        新版 WeChat 4.x 内存中的 key 通常已是 AES-256 页面密钥；
+        旧格式则可能还需要 PBKDF2 派生。这里按 direct AES -> PBKDF2
+        的顺序尝试，确保和提取器验证逻辑一致。
         """
         if not self._key:
             logger.error("缺少原始密钥")
@@ -482,28 +863,81 @@ class WindowsDBReader(BaseDBReader):
                 logger.error("无法读取完整的 page 1")
                 return False
 
-            salt = page1[16:32]  # page 1 salt
+            salt = page1[:16]  # SQLCipher salt
+            direct_modes = [
+                (80, "sha512"),
+                (48, "sha1"),
+            ]
+            for reserve_size, hash_name in direct_modes:
+                try:
+                    reserved = page1[PAGE_SIZE - reserve_size:PAGE_SIZE]
+                    iv = reserved[:IV_SIZE]
+                    encrypted = page1[SALT_SIZE:PAGE_SIZE - reserve_size]
+                    cipher = AES.new(self._key, AES.MODE_CBC, iv=iv)
+                    decrypted = cipher.decrypt(encrypted)
+                    hmac_ok = self._verify_page_hmac(
+                        page1,
+                        self._derive_mac_key(self._key, salt, hash_name),
+                        reserve_size,
+                        hash_name,
+                    )
+                    if self._looks_like_decrypted_page1(decrypted) and hmac_ok:
+                        self._aes_key = self._key
+                        self._hmac_key = self._derive_mac_key(self._key, salt, hash_name)
+                        self._iterations = 0
+                        self._reserve_size = reserve_size
+                        self._hmac_hash = hash_name
+                        self._key_mode = "direct"
+                        logger.info(
+                            f"密钥验证成功 (direct AES, reserve={reserve_size}, hmac={hash_name})"
+                        )
+                        return True
+                except Exception as exc:
+                    logger.debug(f"direct AES 验证失败: {exc}")
 
             # 尝试多种迭代次数
-            for iterations in [256000, 64000, 4000]:
+            for iterations, hash_name, reserve_size in [
+                (256000, "sha512", 80),
+                (64000, "sha1", 48),
+                (4000, "sha1", 48),
+            ]:
                 try:
+                    hmac_module = SHA512 if hash_name == "sha512" else __import__(
+                        "Crypto.Hash.SHA1", fromlist=["SHA1"]
+                    )
                     derived = PBKDF2(
-                        self._key, salt, dkLen=64, count=iterations,
-                        hmac_hash_module=SHA512,
+                        self._key,
+                        salt,
+                        dkLen=KEY_SIZE,
+                        count=iterations,
+                        hmac_hash_module=hmac_module,
+                    )
+                    mac_key = PBKDF2(
+                        derived,
+                        bytes(b ^ 0x3A for b in salt),
+                        dkLen=KEY_SIZE,
+                        count=2,
+                        hmac_hash_module=hmac_module,
                     )
                     # 验证: 使用派生密钥解密 page 1
-                    iv = page1[:16]
-                    encrypted = page1[16:PAGE_SIZE - RESERVED_SIZE]
-                    aes_key = derived[:32]
+                    reserved = page1[PAGE_SIZE - reserve_size:PAGE_SIZE]
+                    iv = reserved[:IV_SIZE]
+                    encrypted = page1[SALT_SIZE:PAGE_SIZE - reserve_size]
+                    aes_key = derived
                     cipher = AES.new(aes_key, AES.MODE_CBC, iv=iv)
                     decrypted = cipher.decrypt(encrypted)
 
-                    if decrypted[:16] == b"SQLite format 3\x00":
+                    if self._looks_like_decrypted_page1(decrypted) and self._verify_page_hmac(
+                        page1, mac_key, reserve_size, hash_name
+                    ):
                         self._aes_key = aes_key
-                        self._hmac_key = derived[32:64]
+                        self._hmac_key = mac_key
                         self._iterations = iterations
+                        self._reserve_size = reserve_size
+                        self._hmac_hash = hash_name
+                        self._key_mode = "pbkdf2"
                         logger.info(
-                            f"密钥派生成功 (iterations={iterations})"
+                            f"密钥派生成功 (iterations={iterations}, hmac={hash_name}, reserve={reserve_size})"
                         )
                         return True
 
@@ -519,6 +953,27 @@ class WindowsDBReader(BaseDBReader):
         except Exception as exc:
             logger.error(f"密钥派生失败: {exc}")
             return False
+
+    @staticmethod
+    def _verify_page_hmac(
+        page: bytes,
+        mac_key: bytes,
+        reserve_size: int,
+        hash_name: str,
+    ) -> bool:
+        if hash_name == "sha512":
+            digestmod = hashlib.sha512
+            stored = page[PAGE_SIZE - reserve_size + IV_SIZE:PAGE_SIZE]
+            data = page[SALT_SIZE:PAGE_SIZE - reserve_size + IV_SIZE]
+        else:
+            digestmod = hashlib.sha1
+            first = page[SALT_SIZE:PAGE_SIZE]
+            stored = first[-32:-12]
+            data = first[:-32]
+
+        calculated = hmac_mod.new(mac_key, data, digestmod)
+        calculated.update(struct.pack("<I", 1))
+        return calculated.digest() == stored
 
     def _decrypt_to_temp(self) -> str:
         """将整个加密数据库解密到临时文件。
@@ -546,15 +1001,20 @@ class WindowsDBReader(BaseDBReader):
                         tmp.write(page_data)
                         continue
 
-                    iv = page_data[:16]
-                    encrypted = page_data[16:PAGE_SIZE - RESERVED_SIZE]
-                    reserved = page_data[PAGE_SIZE - RESERVED_SIZE:PAGE_SIZE]
+                    reserved = page_data[PAGE_SIZE - self._reserve_size:PAGE_SIZE]
+                    iv = reserved[:16]
+                    if page_num == 0:
+                        encrypted = page_data[SALT_SIZE:PAGE_SIZE - self._reserve_size]
+                    else:
+                        encrypted = page_data[:PAGE_SIZE - self._reserve_size]
 
                     cipher = AES.new(self._aes_key, AES.MODE_CBC, iv=iv)
                     decrypted = cipher.decrypt(encrypted)
 
-                    # 重新构建页面: IV(16) + 解密数据 + 保留区(48)
-                    decrypted_page = iv + decrypted + reserved
+                    if page_num == 0:
+                        decrypted_page = self._rebuild_page1(decrypted)
+                    else:
+                        decrypted_page = decrypted + b"\x00" * self._reserve_size
                     tmp.write(decrypted_page)
 
                     if page_num % 1000 == 0 and page_num > 0:
@@ -608,6 +1068,9 @@ class WindowsDBReader(BaseDBReader):
         if self._sqlite_conn is None:
             return []
 
+        if self._has_msg_shard_tables():
+            return self._get_v4_messages_by_type(msg_type, limit)
+
         try:
             cursor = self._sqlite_conn.execute(
                 """
@@ -656,6 +1119,9 @@ class WindowsDBReader(BaseDBReader):
         if self._sqlite_conn is None:
             return []
 
+        if self._has_msg_shard_tables():
+            return self._get_v4_messages_by_talker(talker, limit)
+
         try:
             cursor = self._sqlite_conn.execute(
                 """
@@ -686,4 +1152,88 @@ class WindowsDBReader(BaseDBReader):
 
         except Exception as exc:
             logger.error(f"查询会话 {talker} 消息失败: {exc}")
+            return []
+
+    def _get_v4_messages_by_type(
+        self,
+        msg_type: int,
+        limit: int = 100,
+    ) -> list[WeChatMessage]:
+        messages: list[WeChatMessage] = []
+        try:
+            for table, username in self._get_v4_msg_tables():
+                if len(messages) >= limit:
+                    break
+                cursor = self._sqlite_conn.execute(  # type: ignore[union-attr]
+                    f'SELECT local_id, create_time, real_sender_id, '
+                    f'message_content, local_type, source, '
+                    f'status, origin_source, server_seq '
+                    f'FROM "{table}" '
+                    f'WHERE local_type = ? '
+                    f'ORDER BY local_id DESC '
+                    f'LIMIT ?',
+                    (msg_type, limit - len(messages)),
+                )
+                is_group = "@chatroom" in username
+                for row in cursor:
+                    messages.append(
+                        WeChatMessage(
+                            msg_id=f"{table}:{row['local_id']}",
+                            msg_type=row["local_type"] or 0,
+                            content=self._decode_message_content(row["message_content"]),
+                            sender=username,
+                            room_id=username if is_group else "",
+                            create_time=datetime.fromtimestamp(row["create_time"] or 0),
+                            is_group=is_group,
+                            at_list=[],
+                        )
+                    )
+            return messages
+        except Exception as exc:
+            logger.error(f"按类型查询 Windows 4.x 消息失败: {exc}")
+            return []
+
+    def _get_v4_messages_by_talker(
+        self,
+        talker: str,
+        limit: int = 100,
+    ) -> list[WeChatMessage]:
+        table = f"Msg_{hashlib.md5(talker.encode()).hexdigest()}"
+        messages: list[WeChatMessage] = []
+        try:
+            exists = self._sqlite_conn.execute(  # type: ignore[union-attr]
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                (table,),
+            ).fetchone()
+            if not exists:
+                return []
+            cursor = self._sqlite_conn.execute(  # type: ignore[union-attr]
+                f'SELECT local_id, create_time, real_sender_id, '
+                f'message_content, local_type, source, '
+                f'status, origin_source, server_seq '
+                f'FROM "{table}" '
+                f'ORDER BY local_id DESC '
+                f'LIMIT ?',
+                (limit,),
+            )
+            is_group = "@chatroom" in talker
+            for row in cursor:
+                sender = talker
+                if is_group and not self._is_self_sent_v4_row(row):
+                    sender = self._parse_group_sender(row["source"], talker)
+                messages.append(
+                    WeChatMessage(
+                        msg_id=f"{table}:{row['local_id']}",
+                        msg_type=row["local_type"] or 0,
+                        content=self._decode_message_content(row["message_content"]),
+                        sender=sender,
+                        room_id=talker if is_group else "",
+                        create_time=datetime.fromtimestamp(row["create_time"] or 0),
+                        is_group=is_group,
+                        at_list=[],
+                    )
+                )
+            return messages
+        except Exception as exc:
+            logger.error(f"查询 Windows 4.x 会话 {talker} 消息失败: {exc}")
             return []

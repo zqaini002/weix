@@ -10,7 +10,7 @@ from app.models.database import Base
 from app.services.message_service import MessageService
 from app.services.statistics_service import StatisticsService
 from app.services.report_service import ReportService
-from app.utils.paths import get_base_dir
+from app.utils.paths import get_base_dir, get_data_dir
 
 _engine = None
 _session_factory = None
@@ -28,7 +28,10 @@ def get_engine():
         # 如果是相对路径 SQLite URL，转换为绝对路径
         if "sqlite" in db_url and "///" in db_url:
             rel_path = db_url.split("///")[-1]
-            abs_path = _PROJECT_ROOT / rel_path
+            if not os.path.isabs(rel_path) and rel_path.replace("\\", "/").startswith("data/"):
+                abs_path = get_data_dir() / Path(rel_path).relative_to("data")
+            else:
+                abs_path = Path(rel_path) if os.path.isabs(rel_path) else _PROJECT_ROOT / rel_path
             abs_path.parent.mkdir(parents=True, exist_ok=True)
             db_url = f"sqlite+aiosqlite:///{abs_path}"
 

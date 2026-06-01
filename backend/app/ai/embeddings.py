@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,39 @@ PROVIDER_DIMENSIONS: dict[str, int] = {
 }
 
 DEFAULT_BATCH_SIZE = 20
+
+
+def _sentence_transformers_cache_dirs() -> list[Path]:
+    """返回 sentence-transformers/HuggingFace 常见本地缓存目录。"""
+    candidates: list[Path] = []
+    for env_name in ("SENTENCE_TRANSFORMERS_HOME", "HF_HOME"):
+        value = os.getenv(env_name)
+        if value:
+            candidates.append(Path(value))
+
+    home = Path.home()
+    candidates.extend([
+        home / ".cache" / "torch" / "sentence_transformers",
+        home / ".cache" / "huggingface" / "hub",
+    ])
+    return candidates
+
+
+def can_load_local_embedding(model: str = LOCAL_EMBEDDING_MODEL) -> bool:
+    """判断本地 embedding 模型是否可离线加载。"""
+    model_dir_name = f"sentence-transformers_{model.replace('/', '_')}"
+    hub_dir_name = f"models--sentence-transformers--{model.replace('/', '--')}"
+    for cache_dir in _sentence_transformers_cache_dirs():
+        if (cache_dir / model_dir_name).exists() or (cache_dir / hub_dir_name).exists():
+            return True
+    return False
+
+
+def get_local_embedding_cache_status(model: str = LOCAL_EMBEDDING_MODEL) -> str:
+    """返回本地 embedding 模型缓存状态文案。"""
+    if can_load_local_embedding(model):
+        return "已缓存"
+    return "未缓存，将在后台自动下载"
 
 
 class EmbeddingManager:
@@ -96,17 +130,33 @@ class EmbeddingManager:
 
             os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 
-            logger.info(f"Loading local embedding model: {self._model}")
+            allow_download = not can_load_local_embedding(self._model)
+            if allow_download:
+                logger.info(
+                    "本地 Embedding 模型未找到，开始后台下载: %s。"
+                    "首次下载可能需要几分钟，请保持网络连接。",
+                    self._model,
+                )
+            else:
+                logger.info("正在加载本地 Embedding 模型: %s", self._model)
+
             self._client = SentenceTransformer(
                 self._model,
-                local_files_only=False,
+                local_files_only=not allow_download,
             )
             self._dimension = self._client.get_embedding_dimension()
             logger.info(
-                f"Local embedding model loaded: dim={self._dimension}"
+                "本地 Embedding 模型已就绪: %s, dim=%s",
+                self._model,
+                self._dimension,
             )
         except Exception as exc:
-            logger.error(f"Failed to load local embedding model: {exc}")
+            logger.error(
+                "本地 Embedding 模型加载/下载失败: %s。请检查网络，"
+                "或预先下载 sentence-transformers/%s。",
+                exc,
+                self._model,
+            )
             raise
 
     def _init_api(self) -> None:

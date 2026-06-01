@@ -25,6 +25,7 @@ from typing import Optional
 import psutil
 
 from app.core.base import BaseKeyExtractor
+from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +51,7 @@ class MacOSKeyExtractor(BaseKeyExtractor):
     )
 
     # 密钥持久化文件
-    ALL_KEYS_FILE = Path("data/all_keys.json")
+    ALL_KEYS_FILE = get_data_dir() / "all_keys.json"
 
     DB_NAMES = [
         "MSG.db", "MicroMsg.db", "Misc.db", "Emotion.db",

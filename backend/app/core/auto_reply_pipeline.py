@@ -7,14 +7,27 @@
 import asyncio
 import logging
 import os
-from pathlib import Path
 from typing import Optional
 
 from app.config import get_config
 from app.core.message_monitor import MessageMonitor
 from app.core.platform import Platform
+from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
+
+
+def _normalize_db_key_path(path: str) -> str:
+    return path.replace("\\", "/").lower()
+
+
+def _key_matches_db_path(key_path: str, full_path: str) -> bool:
+    normalized_key = _normalize_db_key_path(key_path)
+    normalized_full = _normalize_db_key_path(full_path)
+    basename = os.path.basename(full_path)
+    if "/" in normalized_key:
+        return normalized_full.endswith(normalized_key)
+    return os.path.normcase(key_path) == os.path.normcase(basename)
 
 
 class AutoReplyPipeline:
@@ -71,13 +84,13 @@ class AutoReplyPipeline:
         keys = self._load_keys(platform)
         if not keys:
             logger.warning("未找到数据库密钥，跳过流水线启动")
-            return
+            return False
 
         # 2. 打开消息数据库 (用于监控)
         msg_reader = self._open_message_db(platform, keys)
         if msg_reader is None:
             logger.warning("无法打开消息数据库，跳过流水线启动")
-            return
+            return False
 
         # 3. 构建名称映射 (wxid -> 显示名，用于 AppleScript 搜索)
         self._name_map = self._build_name_map(platform, keys)
@@ -115,6 +128,7 @@ class AutoReplyPipeline:
         self._running = True
         self._task = asyncio.create_task(self._process_loop())
         logger.info("自动回复流水线已启动")
+        return True
 
     async def stop(self) -> None:
         """停止自动回复流水线。"""
@@ -151,7 +165,7 @@ class AutoReplyPipeline:
         if not keys:
             import json
 
-            cache = Path("data/all_keys.json")
+            cache = get_data_dir() / "all_keys.json"
             if cache.exists():
                 with open(cache) as f:
                     keys = json.load(f)
@@ -185,11 +199,12 @@ class AutoReplyPipeline:
         for full_path in all_dbs:
             basename = os.path.basename(full_path)
             for key_path, hex_key in keys.items():
-                if not (full_path.endswith(key_path) or key_path.endswith(basename)):
+                key_name = os.path.basename(key_path)
+                if not _key_matches_db_path(key_path, full_path):
                     continue
-                if "message_0.db" in key_path or "message_0.db" in basename:
+                if key_name == "message_0.db" or basename == "message_0.db":
                     candidates.append((full_path, hex_key))
-                elif "MSG.db" in key_path or "MSG.db" in basename:
+                elif key_name == "MSG.db" or basename == "MSG.db":
                     fallback.append((full_path, hex_key))
                 else:
                     # 其他匹配 key 的文件作为最后兜底
@@ -206,7 +221,7 @@ class AutoReplyPipeline:
 
         if not all_candidates:
             # 诊断：检查是否 message_0.db 存在但缺少密钥
-            msg0_files = [f for f in all_dbs if "message_0.db" in os.path.basename(f)]
+            msg0_files = [f for f in all_dbs if os.path.basename(f) == "message_0.db"]
             if msg0_files:
                 logger.warning(
                     f"message_0.db 存在 ({msg0_files[0]}) 但无匹配密钥，"
@@ -236,7 +251,7 @@ class AutoReplyPipeline:
                 continue
 
         # 最终兜底：用所有密钥直接尝试 message_0.db（密钥可能未关联路径）
-        msg0_files = [f for f in all_dbs if "message_0.db" in os.path.basename(f)]
+        msg0_files = [f for f in all_dbs if os.path.basename(f) == "message_0.db"]
         if msg0_files:
             msg0_path = msg0_files[0]
             logger.info(
@@ -274,9 +289,7 @@ class AutoReplyPipeline:
         contact_key = None
         for full_path in all_dbs:
             for key_path, hex_key in keys.items():
-                if full_path.endswith(key_path) or key_path.endswith(
-                    os.path.basename(full_path)
-                ):
+                if _key_matches_db_path(key_path, full_path):
                     if "contact.db" in key_path or "contact.db" in os.path.basename(
                         full_path
                     ):

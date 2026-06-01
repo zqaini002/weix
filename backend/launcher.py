@@ -293,6 +293,8 @@ class MainWindow(QMainWindow):
         self._startup_timer_count = 0
         _server_error = ""
         self._log("正在启动 Weix 服务...")
+        if sys.platform == "win32":
+            self._log(f"当前进程 UAC 提升: {'是' if _is_admin() else '否'}")
         self._update_ui_state(ServiceState.STARTING)
 
         # PyInstaller --windowed: stdout/stderr 可能为 None
@@ -357,8 +359,11 @@ class MainWindow(QMainWindow):
                 self._statusbar.showMessage(f"等待服务就绪... ({reason})")
 
     def _on_health_timeout(self):
+        global _server
         if self._state == ServiceState.STARTING:
             self._log("错误: 服务启动超时 (60秒)，请检查日志中的错误信息")
+            if _server is not None:
+                _server.should_exit = True
             self._update_ui_state(ServiceState.ERROR)
             self._statusbar.showMessage("服务启动超时")
 
@@ -387,6 +392,10 @@ class MainWindow(QMainWindow):
             if _server_thread and _server_thread.is_alive():
                 _emitter.log_received.emit("等待服务关闭...")
                 _server_thread.join(timeout=15)
+                if _server_thread.is_alive():
+                    _emitter.log_received.emit(
+                        "服务仍在退出中，请稍等；如窗口仍持续打印，请关闭 Weix 窗口或用任务管理器结束 Weix.exe"
+                    )
             _server = None
             _emitter.server_stopped.emit()
 
@@ -455,10 +464,17 @@ def _is_admin() -> bool:
 def _request_admin():
     """以管理员权限重新启动当前程序 (仅 Windows)。"""
     import ctypes
+    import subprocess
+
     exe = sys.executable
+    if getattr(sys, 'frozen', False):
+        params = subprocess.list2cmdline(sys.argv[1:])
+    else:
+        # 源码运行时需要把 launcher.py 一并传给提升后的 python.exe。
+        params = subprocess.list2cmdline(sys.argv)
     # ShellExecuteW: 'runas' 会弹出 UAC 提权对话框
     ctypes.windll.shell32.ShellExecuteW(
-        None, "runas", exe, "", "", 1
+        None, "runas", exe, params, "", 1
     )
 
 
@@ -470,10 +486,12 @@ def main():
     if getattr(sys, 'frozen', False):
         os.chdir(Path(sys.executable).parent)
 
+    app = QApplication(sys.argv)
+    app.setApplicationName("Weix")
+    app.setStyle("Fusion")
+
     # Windows: 检查管理员权限, 非管理员时询问是否提权
     if sys.platform == "win32" and not _is_admin():
-        # 先创建 QApplication 才能弹 QMessageBox
-        _app = QApplication(sys.argv)
         reply = QMessageBox.question(
             None, "权限请求",
             "以管理员权限运行可以自动提取微信数据库密钥。\n\n"
@@ -486,10 +504,6 @@ def main():
             _request_admin()
             sys.exit(0)
         # 用户选「否」, 继续以普通权限运行
-
-    app = QApplication(sys.argv)
-    app.setApplicationName("Weix")
-    app.setStyle("Fusion")
 
     window = MainWindow()
     window.show()

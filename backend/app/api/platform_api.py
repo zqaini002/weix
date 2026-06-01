@@ -6,12 +6,26 @@ from fastapi import APIRouter, Depends, Query
 
 from app.api.auth import verify_token
 from app.core.platform import Platform
+from app.utils.paths import get_data_dir
 
 router = APIRouter(
     prefix="/api/platform",
     tags=["platform"],
     dependencies=[Depends(verify_token)],
 )
+
+
+def _normalize_db_key_path(path: str) -> str:
+    return path.replace("\\", "/").lower()
+
+
+def _key_matches_db_path(key_path: str, full_path: str) -> bool:
+    normalized_key = _normalize_db_key_path(key_path)
+    normalized_full = _normalize_db_key_path(full_path)
+    basename = os.path.basename(full_path)
+    if "/" in normalized_key:
+        return normalized_full.endswith(normalized_key)
+    return os.path.normcase(key_path) == os.path.normcase(basename)
 
 
 @router.get("/contacts")
@@ -43,9 +57,7 @@ async def list_contacts(
         if not keys:
             # 尝试从 all_keys.json 手动加载
             import json
-            from pathlib import Path
-
-            cache = Path("data/all_keys.json")
+            cache = get_data_dir() / "all_keys.json"
             if cache.exists():
                 with open(cache) as f:
                     keys = json.load(f)
@@ -71,9 +83,7 @@ async def list_contacts(
                 if hasattr(reader, "find_database_files"):
                     for full_path in all_dbs:
                         for key_path, hex_key in keys.items():
-                            if full_path.endswith(key_path) or key_path.endswith(
-                                os.path.basename(full_path)
-                            ):
+                            if _key_matches_db_path(key_path, full_path):
                                 if target in key_path or target in os.path.basename(full_path):
                                     return full_path, hex_key
                 return None, None
@@ -149,10 +159,9 @@ async def platform_status():
     """获取平台状态：微信进程、数据库、密钥提取。"""
     platform = Platform.get()
     import json
-    from pathlib import Path
 
     wechat_running = await platform.sender.is_wechat_running()
-    key_ready = Path("data/all_keys.json").exists()
+    key_ready = (get_data_dir() / "all_keys.json").exists()
 
     return {
         "platform": platform.name,

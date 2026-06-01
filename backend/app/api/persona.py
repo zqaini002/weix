@@ -20,6 +20,19 @@ router = APIRouter(
 )
 
 
+def _normalize_db_key_path(path: str) -> str:
+    return path.replace("\\", "/").lower()
+
+
+def _key_matches_db_path(key_path: str, full_path: str) -> bool:
+    normalized_key = _normalize_db_key_path(key_path)
+    normalized_full = _normalize_db_key_path(full_path)
+    basename = os.path.basename(full_path)
+    if "/" in normalized_key:
+        return normalized_full.endswith(normalized_key)
+    return os.path.normcase(key_path) == os.path.normcase(basename)
+
+
 class PersonaUpdateRequest(BaseModel):
     """人工编辑 persona skill 的请求体。"""
 
@@ -92,7 +105,7 @@ async def analyze_persona(force: bool = False):
         for full_path in all_dbs:
             db_name = os.path.basename(full_path)
             for key_path, hex_key in keys.items():
-                if full_path.endswith(key_path) or key_path.endswith(db_name):
+                if _key_matches_db_path(key_path, full_path):
                     if "message_0.db" in key_path or "message_0.db" in db_name:
                         msg_db_path = full_path
                         msg_key = hex_key
