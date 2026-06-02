@@ -36,6 +36,9 @@ jobs:
           source venv/bin/activate
           pip install -r backend/requirements.txt
           pip install pyinstaller
+          cp config/config.example.yaml config/config.yaml
+          mkdir -p data
+          touch data/.gitkeep
           pyinstaller \
             --name=Weix \
             --onedir \
@@ -110,6 +113,9 @@ jobs:
           venv\Scripts\activate
           pip install -r backend/requirements.txt
           pip install pyinstaller
+          copy config\config.example.yaml config\config.yaml
+          mkdir data 2>nul
+          type nul > data\.gitkeep
           pyinstaller --name=Weix --onedir --console --clean --noconfirm --paths=backend --add-data "config;config" --add-data "data;data" --add-data "frontend/dist;frontend_dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=sqlalchemy.ext.asyncio --hidden-import=aiosqlite --hidden-import=chromadb --hidden-import=sentence_transformers --hidden-import=tiktoken --hidden-import=langchain --hidden-import=jieba --hidden-import=passlib.handlers.bcrypt --hidden-import=pycryptodome --collect-all chromadb --collect-all sentence_transformers backend/app/main.py
 
       - name: Package (ZIP)

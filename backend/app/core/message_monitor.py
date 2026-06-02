@@ -276,6 +276,18 @@ class MessageMonitor:
         if not msg.content and msg.msg_type != MSG_TYPE_IMAGE:
             return False
 
+        if getattr(msg, "is_self", False):
+            if not self._passes_chat_acl(msg):
+                return False
+            self._stats.self_skipped += 1
+            logger.debug(
+                "当前账号自己发送的消息入记忆通道 | sender=%s | room=%s | content=%s",
+                msg.sender,
+                msg.room_id,
+                msg.content[:50],
+            )
+            return True
+
         if self._is_recent_sent_message(msg):
             logger.debug(
                 "跳过机器人已发送消息回灌 | receiver=%s | content=%s",
@@ -412,6 +424,7 @@ class MonitorStats:
     total_processed: int = 0
     dropped: int = 0
     system_skipped: int = 0
+    self_skipped: int = 0
     errors: int = 0
     last_poll_time: float = 0.0
     start_time: float = field(default_factory=time.monotonic)

@@ -13,6 +13,7 @@ class WeChatMessage:
     room_id: str = ""  # empty for private chat
     create_time: datetime = field(default_factory=datetime.now)
     is_group: bool = False
+    is_self: bool = False
     at_list: list[str] = field(default_factory=list)
 
     @property

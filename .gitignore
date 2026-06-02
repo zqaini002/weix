@@ -36,9 +36,12 @@ frontend/dist/
 .playwright-mcp/
 .spec-workflow/
 
-# Data - temporary files
-data/tmp/
-data/tmp/screenshots/
+# Data - 敏感运行时数据，禁止提交或打包
+data/
+!data/.gitkeep
+
+# Config - 本地配置含个人信息和密钥，仅提交模板
+config/config.yaml
 
 # Environment
 .env

@@ -7,6 +7,7 @@
 import asyncio
 import logging
 import os
+import re
 from typing import Optional
 
 from app.config import get_config
@@ -57,9 +58,17 @@ class AutoReplyPipeline:
         self._buffer: dict[str, list] = {}
         self._buffer_timers: dict[str, asyncio.Task] = {}
         self._debounce_seconds = 20
-        macos_cfg = get_config().macos_sender if hasattr(get_config(), "macos_sender") else {}
-        self._park_after_send = macos_cfg.get("park_after_send", True)
-        self._parking_receiver = macos_cfg.get("parking_receiver", "小号")
+        self._recent_chat_context: dict[str, list[str]] = {}
+        self._recent_context_limit = 12
+        platform = Platform.get()
+        if platform.is_macos:
+            sender_cfg = get_config().macos_sender if hasattr(get_config(), "macos_sender") else {}
+            self._park_after_send = sender_cfg.get("park_after_send", True)
+            self._parking_receiver = sender_cfg.get("parking_receiver", "小号")
+        else:
+            sender_cfg = get_config().windows_sender if hasattr(get_config(), "windows_sender") else {}
+            self._park_after_send = sender_cfg.get("park_after_send", False)
+            self._parking_receiver = sender_cfg.get("parking_receiver", "")
 
     # ------------------------------------------------------------------
     # Public API
@@ -414,6 +423,7 @@ class AutoReplyPipeline:
         """消息入口：白名单检查通过后进入防抖缓冲，20s 内同人消息合并处理。"""
         logger.info(
             f">>> 收到消息 | sender={msg.sender} | is_group={msg.is_group} | "
+            f"is_self={getattr(msg, 'is_self', False)} | "
             f"content={msg.content[:80]}"
         )
         config = get_config().auto_reply
@@ -464,6 +474,27 @@ class AutoReplyPipeline:
                 f"in_whitelist={msg.room_id in config.get('group_whitelist', [])}"
             )
 
+        # 持久化和短期上下文记录先发生；自发消息只记忆，不进入自动回复队列。
+        await self._persist_message(msg)
+        self._remember_message_context(msg)
+
+        if getattr(msg, "is_self", False):
+            await self._remember_self_message(msg)
+            logger.info(
+                "当前账号自发消息已记录，跳过自动回复 | receiver=%s | content=%s",
+                receiver,
+                msg.content[:50],
+            )
+            return
+
+        if not getattr(msg, "is_text", False) or not str(msg.content or "").strip():
+            logger.info(
+                "非文本或空内容消息已记录，跳过自动回复 | sender=%s | msg_type=%s",
+                msg.sender,
+                msg.msg_type,
+            )
+            return
+
         # 防抖：取消旧定时器，入队，启动新 20s 定时器
         if buffer_key in self._buffer_timers:
             self._buffer_timers[buffer_key].cancel()
@@ -471,9 +502,6 @@ class AutoReplyPipeline:
         if buffer_key not in self._buffer:
             self._buffer[buffer_key] = []
         self._buffer[buffer_key].append(msg)
-
-        # 持久化消息到数据库
-        await self._persist_message(msg)
 
         self._buffer_timers[buffer_key] = asyncio.create_task(
             self._flush_buffer(buffer_key)
@@ -492,13 +520,23 @@ class AutoReplyPipeline:
         if not messages:
             return
 
-        msg = messages[0]
+        reply_messages = [
+            m for m in messages
+            if not getattr(m, "is_self", False)
+            and getattr(m, "is_text", False)
+            and str(m.content or "").strip()
+        ]
+        if not reply_messages:
+            logger.info("缓冲内无可回复文本消息，跳过 | key=%s", buffer_key)
+            return
+
+        msg = reply_messages[0]
         if msg.is_group:
             receiver = msg.room_id or msg.sender
         else:
             receiver = msg.sender
 
-        parts = [m.content for m in messages]
+        parts = [m.content for m in reply_messages]
         combined = "\n".join(parts)
         if len(combined) > 2000:
             combined = combined[:2000] + "..."
@@ -514,7 +552,7 @@ class AutoReplyPipeline:
 
         # 1. 规则匹配（逐条匹配，取第一条命中）
         if reply_mode in ("keyword", "all") and self._rule_engine:
-            for m in messages:
+            for m in reply_messages:
                 result = await self._rule_engine.match(m.content)
                 if result.get("matched"):
                     reply_text = result.get("reply", "")
@@ -525,9 +563,11 @@ class AutoReplyPipeline:
 
         # 2. AI 兜底（用合并内容调用）
         if not reply_text and reply_mode in ("ai", "all"):
-            ai_msg = messages[0]
+            ai_msg = reply_messages[0]
             ai_msg.content = combined
             reply_text = await self._ai_chat(ai_msg)
+
+        reply_text = self._clean_reply_for_wechat(reply_text)
 
         # 3. 发送回复
         if reply_text:
@@ -616,6 +656,84 @@ class AutoReplyPipeline:
             logger.error(f"持久化消息失败: {exc}")
 
 
+    def _remember_message_context(self, msg) -> None:
+        """记录最近聊天上下文，供下一次 AI 回复理解当前账号刚说过什么。"""
+        session_id = self._chat_session_id(msg)
+        content = str(msg.content or "").strip()
+        if not session_id or not content:
+            return
+
+        if getattr(msg, "is_self", False):
+            label = "我"
+        elif msg.is_group:
+            label = self._name_map.get(msg.sender, msg.sender)
+        else:
+            label = self._name_map.get(msg.sender, "对方")
+
+        line = f"{label}: {content}"
+        bucket = self._recent_chat_context.setdefault(session_id, [])
+        bucket.append(line)
+        if len(bucket) > self._recent_context_limit:
+            del bucket[:-self._recent_context_limit]
+
+    def _format_recent_context(self, session_id: str) -> str:
+        lines = self._recent_chat_context.get(session_id, [])
+        return "\n".join(lines[-self._recent_context_limit:]) if lines else "无历史对话"
+
+    async def _remember_self_message(self, msg) -> None:
+        """自发消息只写入记忆，不触发规则和 AI 回复。"""
+        content = str(msg.content or "").strip()
+        if not content:
+            return
+        try:
+            if self._ai_agent is None:
+                from app.ai.agent import WeixAgent
+                self._ai_agent = WeixAgent()
+                logger.info("AI 助手已初始化用于记忆自发消息")
+            session_id = self._chat_session_id(msg)
+            await self._ai_agent.remember_observation(
+                message=content,
+                session_id=session_id,
+                context={
+                    "is_group": msg.is_group,
+                    "user_name": self._name_map.get(msg.sender, msg.sender),
+                    "user_wxid": msg.sender,
+                    "room_id": msg.room_id or "",
+                    "room_name": self._name_map.get(msg.room_id, "") if msg.room_id else "",
+                    "speaker": "self",
+                },
+            )
+        except Exception as exc:
+            logger.warning("记录自发消息到 AI 记忆失败: %s", exc)
+
+    @staticmethod
+    def _chat_session_id(msg) -> str:
+        return (
+            f"group:{msg.room_id}" if msg.is_group and msg.room_id
+            else f"private:{msg.sender}"
+        )
+
+    @staticmethod
+    def _clean_reply_for_wechat(text: str) -> str:
+        """把规则/AI 回复压成单条微信口语文本。"""
+        text = str(text or "").strip()
+        if not text:
+            return ""
+
+        # 去掉常见 emoji 和符号表情，避免和当前账号风格冲突。
+        text = re.sub(
+            "[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\U00002700-\U000027BF]+",
+            "",
+            text,
+        )
+        text = re.sub(r"[\r\n\t]+", " ", text)
+        text = re.sub(r"\s{2,}", " ", text).strip()
+        text = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", text)
+        text = re.sub(r"\s+([，。！？、；：,.!?])", r"\1", text)
+        text = re.sub(r"([（(])\s+", r"\1", text)
+        text = re.sub(r"\s+([）)])", r"\1", text)
+        return text
+
     async def _ai_chat(self, msg) -> str:
         """调用 AI 生成聊天回复。"""
         try:
@@ -641,6 +759,7 @@ class AutoReplyPipeline:
                 "user_wxid": msg.sender,
                 "room_id": msg.room_id or "",
                 "room_name": room_name,
+                "chat_context": self._format_recent_context(session_id),
             }
 
             reply = await self._ai_agent.chat(

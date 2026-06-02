@@ -279,13 +279,45 @@ class WeixAgent:
                     agent = self._create_agent(session_id, is_group, context)
                     await asyncio.sleep(1 * attempt)
 
-        error_msg = "抱歉，AI 服务暂时不可用。请稍后再试。"
-        if last_error:
-            error_msg += f"\n（错误详情: {last_error}）"
         logger.error(
             f"All {MAX_RETRIES} retries failed for session={session_id}: {last_error}"
         )
-        return error_msg
+        return "我这会儿有点卡，稍后再说"
+
+    async def remember_observation(
+        self,
+        message: str,
+        session_id: str,
+        context: dict | None = None,
+    ) -> None:
+        """记录一条不需要回复的观察消息。
+
+        用于当前账号自己发出的微信消息：它应该进入短期/长期记忆，
+        但不能被当成对方消息触发自动回复。
+        """
+        text = str(message or "").strip()
+        if not text or not session_id:
+            return
+
+        context = dict(context) if context else {}
+        speaker = context.get("speaker", "self")
+        summary = f"{speaker}: {text}"
+
+        self.memory.record_turn(session_id, summary, "")
+
+        self._ensure_rag()
+        if self._rag is not None:
+            try:
+                await self._rag.remember_conversation(session_id, summary)
+            except Exception as exc:
+                logger.warning(
+                    "Failed to remember observation for session=%s: %s",
+                    session_id,
+                    exc,
+                )
+
+        await self.memory.maybe_summarize(session_id)
+        self._save_checkpoints()
 
     def chat_sync(
         self,

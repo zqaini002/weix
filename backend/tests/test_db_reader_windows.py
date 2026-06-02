@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import sys
 
 import pytest
@@ -81,3 +82,41 @@ def test_wechat_data_dir_discovery_scans_one_level_drive_dirs(tmp_path, monkeypa
     data_dirs = find_wechat_data_dirs()
 
     assert WeChatDataDir(str(data_root), "drive shallow scan") in data_dirs
+
+
+def test_windows_v4_self_sent_uses_current_account_rowid(monkeypatch):
+    """当前账号 rowid 不是 1 时，也应识别为自己发出的消息。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE Name2Id (user_name TEXT)")
+    conn.execute("INSERT INTO Name2Id (rowid, user_name) VALUES (1, 'wxid_friend')")
+    conn.execute("INSERT INTO Name2Id (rowid, user_name) VALUES (2, 'wxid_me')")
+
+    reader = WindowsDBReader()
+    reader._sqlite_conn = conn
+    monkeypatch.setattr(WindowsDBReader, "get_current_wxid", classmethod(lambda cls: "wxid_me"))
+
+    self_row = conn.execute(
+        "SELECT 2 AS real_sender_id, 3 AS status, 0 AS origin_source, 123 AS server_seq"
+    ).fetchone()
+    friend_row = conn.execute(
+        "SELECT 1 AS real_sender_id, 3 AS status, 0 AS origin_source, 123 AS server_seq"
+    ).fetchone()
+
+    assert reader._is_self_sent_v4_row(self_row) is True
+    assert reader._is_self_sent_v4_row(friend_row) is False
+    assert reader._get_current_sender_id() == 2
+
+
+def test_windows_v4_self_sent_fallback_keeps_local_send_signature():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+
+    reader = WindowsDBReader()
+    reader._sqlite_conn = conn
+
+    local_send_row = conn.execute(
+        "SELECT 0 AS real_sender_id, 2 AS status, 1 AS origin_source, 0 AS server_seq"
+    ).fetchone()
+
+    assert reader._is_self_sent_v4_row(local_send_row) is True

@@ -34,6 +34,27 @@ def _msg(sender: str, *, room_id: str = "", is_group: bool = False) -> WeChatMes
     )
 
 
+def test_should_process_keeps_self_message_for_memory(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.message_monitor.get_config",
+        lambda: SimpleNamespace(
+            auto_reply={
+                "enabled": True,
+                "private_chat_mode": "all",
+            }
+        ),
+    )
+    monitor = _monitor()
+    monitor.remember_sent_message("wxid_allowed", "测试")
+
+    msg = _msg("wxid_allowed")
+    msg.is_self = True
+    msg.content = "测试"
+
+    assert monitor._should_process(msg) is True
+    assert monitor._stats.self_skipped == 1
+
+
 def test_should_process_skips_private_not_in_whitelist(monkeypatch):
     monkeypatch.setattr(
         "app.core.message_monitor.get_config",

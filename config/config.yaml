@@ -83,7 +83,20 @@ macos_sender:
   window_activate_delay: 0.5
 windows_sender:
   click_x_ratio: 0.5
-  click_y_ratio: 0.75
+  click_y_ratio: 0.88
+  park_after_send: true
+  parking_receiver: 小号
+  paste_method: context_menu
+  search_x_offset: 173
+  search_y_offset: 49
+  search_clear_x_offset: 247
+  search_clear_y_offset: 49
+  search_result_x_offset: 153
+  search_result_y_offset: 130
+  send_button_x_from_right: 72
+  send_button_y_from_bottom: 40
+  verify_timeout: 30.0
+  verify_interval: 1.0
   search_result_delay: 2.0
   skip_search_ttl: 60
   type_delay: 0.3

@@ -1,0 +1,106 @@
+# Weix 配置文件模板
+# 复制为 config.yaml 后按需修改
+# 敏感值请使用环境变量: ${VAR_NAME} 或 ${VAR_NAME:-默认值}
+
+admin:
+  jwt_secret: ${JWT_SECRET:-change-me-in-production}
+  password: ${ADMIN_PASSWORD:-admin123}
+  username: admin
+
+ai:
+  amap_key: ${AMAP_KEY:-}
+  amap_security_key: ${AMAP_SECURITY_KEY:-}
+  api_key: ${DEEPSEEK_API_KEY:-}
+  base_url: https://api.deepseek.com
+  max_tokens: 2000
+  model: deepseek-v4-pro
+  persona_message_limit: 3000
+  persona_mode: contextual
+  persona_since_days: 90
+  provider: deepseek
+  system_prompt: 你是一个友好的微信助手，可以回答问题、提供建议、帮助用户解决问题。
+  temperature: 0.7
+
+anti_detect:
+  circuit_breaker_threshold: 3
+  cooldown_per_session: 30
+  macos:
+    max_send_interval: 20
+    min_send_interval: 8
+  max_messages_per_minute: 20
+  max_send_interval: 45
+  min_send_interval: 15
+
+auto_reply:
+  enabled: true
+  group_chat_mode: whitelist
+  group_whitelist: []
+  private_chat_mode: whitelist
+  private_whitelist: []
+  reply_mode: all
+  rules: []
+
+database:
+  url: sqlite+aiosqlite:///data/weix.db
+
+forward_rules: []
+
+macos_sender:
+  click_x_ratio: 0.5
+  click_y_ratio: 0.95
+  group_search_arrows: 2
+  method: applescript
+  search_result_delay: 5.0
+  type_delay: 0.3
+  window_activate_delay: 0.5
+
+windows_sender:
+  click_x_ratio: 0.5
+  click_y_ratio: 0.88
+  park_after_send: true
+  parking_receiver: 小号
+  paste_method: context_menu
+  search_x_offset: 173
+  search_y_offset: 49
+  search_clear_x_offset: 247
+  search_clear_y_offset: 49
+  search_result_x_offset: 153
+  search_result_y_offset: 130
+  send_button_x_from_right: 72
+  send_button_y_from_bottom: 40
+  verify_after_send: true
+  verify_timeout: 30.0
+  verify_interval: 1.0
+  search_result_delay: 2.0
+  skip_search_ttl: 60
+  type_delay: 0.3
+  window_activate_delay: 0.5
+
+monitor:
+  poll_interval: 2
+
+platform: auto
+
+statistics:
+  daily_report_time: "22:00"
+  data_retention_days: 30
+  weekly_report_day: 6
+  weekly_report_time: "20:00"
+
+templates: []
+
+wcf:
+  enabled: true
+  host: 127.0.0.1
+  port: 10010
+
+wechat:
+  macos:
+    data_dir: auto
+    version: 4.x
+  windows:
+    data_dir: auto
+    version: 3.9.12.51
+
+workflow_engine: legacy
+workflows: []

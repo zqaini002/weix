@@ -1,6 +1,6 @@
 """Windows 平台消息发送器测试。
 
-验证 WindowsSender 通过 pyautogui 模拟键盘鼠标操作微信 GUI。
+验证 WindowsSender 通过鼠标点击和微信右键粘贴菜单操作 GUI。
 所有测试 mock pyautogui 调用，验证操作序列而非实际 GUI 行为。
 """
 
@@ -24,6 +24,7 @@ def mock_pyautogui():
         patch("pyautogui.press", MagicMock()),
         patch("pyautogui.hotkey", MagicMock()),
         patch("pyautogui.click", MagicMock()),
+        patch("pyautogui.rightClick", MagicMock()),
         patch("pyautogui.size", MagicMock(return_value=(1920, 1080))),
         patch("pyperclip.copy", MagicMock()),
     ):
@@ -32,11 +33,12 @@ def mock_pyautogui():
 
 class FakeWindow:
     """模拟 pygetwindow 窗口对象。"""
-    def __init__(self, left=0, top=0, width=1200, height=800):
+    def __init__(self, left=0, top=0, width=1200, height=800, hwnd=None):
         self.left = left
         self.top = top
         self.width = width
         self.height = height
+        self.hwnd = hwnd
 
     def activate(self):
         pass
@@ -51,6 +53,7 @@ def _make_sender():
     sender._search_result_delay = 0
     sender._type_delay = 0
     sender._skip_search_ttl = 60
+    sender._verify_after_send = False
     return sender
 
 
@@ -64,19 +67,19 @@ def _mock_window(sender, window=None):
 
 @pytest.mark.asyncio
 async def test_send_text_full_search_flow():
-    """完整搜索发送：Ctrl+F → 粘贴名称 → Enter → 粘贴消息 → Enter。"""
+    """完整搜索发送：点击搜索框 → 粘贴名称 → 点击结果 → 粘贴消息 → 点击发送。"""
     sender = _make_sender()
     _mock_window(sender)
 
     ok = await sender.send_text("你好", "文件传输助手")
 
     assert ok is True
-    # 验证搜索快捷键
-    pyautogui.hotkey.assert_any_call("ctrl", "f")
+    # 不使用键盘快捷键或按键，避免焦点错误导致退出/误操作。
+    pyautogui.hotkey.assert_not_called()
+    pyautogui.press.assert_not_called()
     # 验证消息已复制到剪贴板
     pyperclip.copy.assert_any_call("你好")
-    # 验证消息粘贴
-    pyautogui.hotkey.assert_any_call("ctrl", "v")
+    pyperclip.copy.assert_any_call("文件传输助手")
 
 
 @pytest.mark.asyncio
@@ -86,8 +89,10 @@ async def test_send_text_skip_search_same_receiver():
     _mock_window(sender)
 
     # 第一次：完整搜索
-    await sender.send_text("第一条", "文件传输助手")
-    pyautogui.hotkey.assert_any_call("ctrl", "f")
+    ok = await sender.send_text("第一条", "文件传输助手")
+    assert ok is True
+    pyautogui.hotkey.assert_not_called()
+    pyautogui.press.assert_not_called()
 
     # 重置 mock 调用记录
     pyautogui.hotkey.reset_mock()
@@ -95,10 +100,8 @@ async def test_send_text_skip_search_same_receiver():
     # 第二次：同接收者，应跳过搜索
     await sender.send_text("第二条", "文件传输助手")
 
-    # 不应有 Ctrl+F
-    for call_args in pyautogui.hotkey.call_args_list:
-        args = call_args[0] if call_args[0] else call_args[1]
-        assert args != ("ctrl", "f"), "同接收者不应触发搜索"
+    pyautogui.hotkey.assert_not_called()
+    pyautogui.press.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -107,20 +110,16 @@ async def test_send_text_group_chat_always_full_search():
     sender = _make_sender()
     _mock_window(sender)
 
-    # 两次群聊，每次都应有 Ctrl+F
+    # 两次群聊，每次都应完整搜索，但不使用快捷键。
     await sender.send_text("消息1", "测试群", is_group=True)
-    pyautogui.hotkey.assert_any_call("ctrl", "f")
+    pyautogui.hotkey.assert_not_called()
+    pyautogui.press.assert_not_called()
 
     pyautogui.hotkey.reset_mock()
 
     await sender.send_text("消息2", "测试群", is_group=True)
-    # 群聊不跳过搜索
-    found_search = False
-    for call_args in pyautogui.hotkey.call_args_list:
-        args = call_args[0] if call_args[0] else call_args[1]
-        if args == ("ctrl", "f"):
-            found_search = True
-    assert found_search, "群聊应始终执行搜索"
+    pyautogui.hotkey.assert_not_called()
+    pyautogui.press.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -153,7 +152,8 @@ async def test_open_chat_searches_without_sending():
 
     ok = await sender.open_chat("小号")
     assert ok is True
-    pyautogui.hotkey.assert_any_call("ctrl", "f")
+    pyautogui.hotkey.assert_not_called()
+    pyautogui.press.assert_not_called()
     # 不应复制消息文本
     for call_args in pyperclip.copy.call_args_list:
         if call_args[0]:
@@ -199,3 +199,23 @@ def test_global_lock_serialization():
     assert isinstance(lock, threading.Lock)
     assert lock.acquire(blocking=False)  # 锁未被持有
     lock.release()
+
+
+def test_ensure_window_visible_moves_offscreen_window():
+    """非最大化微信窗口跑出屏幕时，应挪回可见区域再点击发送。"""
+    sender = _make_sender()
+    offscreen = FakeWindow(left=1173, top=47, width=922, height=802, hwnd=123)
+    refreshed = FakeWindow(left=990, top=47, width=922, height=802, hwnd=123)
+    sender._find_wechat_window = MagicMock(return_value=refreshed)
+
+    with (
+        patch("win32gui.GetWindowPlacement", MagicMock(return_value=(0, 1, None, None, None))),
+        patch("win32gui.SetWindowPos", MagicMock()) as set_window_pos,
+    ):
+        result = sender._ensure_window_visible(offscreen)
+
+    assert result is refreshed
+    set_window_pos.assert_called_once()
+    args = set_window_pos.call_args[0]
+    assert args[2] == 990
+    assert args[3] == 47

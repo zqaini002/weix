@@ -65,6 +65,8 @@ class WindowsDBReader(BaseDBReader):
         r"E:\xwechat_files",
     ]
 
+    REFRESH_INTERVAL = 1.5  # 刷新间隔（秒），避免每 2s 轮询都重新解密整库
+
     def __init__(self):
         self._key: Optional[bytes] = None
         self._aes_key: Optional[bytes] = None
@@ -78,6 +80,8 @@ class WindowsDBReader(BaseDBReader):
         self._key_mode: str = ""
         self._lock = threading.Lock()
         self._msg_table_cache: Optional[list[tuple[str, str]]] = None
+        self._last_refresh: float = 0
+        self._current_sender_id: Optional[int] = None
 
     # --- 公共接口 ---
 
@@ -119,6 +123,45 @@ class WindowsDBReader(BaseDBReader):
             logger.error(f"打开数据库失败: {exc}")
             return False
 
+    def refresh(self) -> bool:
+        """重新解密源数据库以获取最新消息。
+
+        WeChat 持续写入原始加密库，而 open_db() 创建的是静态临时副本。
+        此方法重新解密并替换旧副本，使后续查询能看到新消息。
+
+        Returns:
+            True 表示刷新成功。
+        """
+        if not self._db_path or not self._key:
+            return False
+        try:
+            with self._lock:
+                old_path = self._decrypted_path
+                old_conn = self._sqlite_conn
+                self._decrypted_path = self._decrypt_to_temp()
+                self._sqlite_conn = sqlite3.connect(
+                    f"file:{self._decrypted_path}?mode=ro",
+                    uri=True,
+                    check_same_thread=False,
+                )
+                self._sqlite_conn.row_factory = sqlite3.Row
+                self._msg_table_cache = None
+                self._last_refresh = time.monotonic()
+            if old_conn:
+                try:
+                    old_conn.close()
+                except Exception:
+                    pass
+            if old_path:
+                try:
+                    os.unlink(old_path)
+                except Exception:
+                    pass
+            return True
+        except Exception as exc:
+            logger.error(f"刷新数据库副本失败: {exc}")
+            return False
+
     def query_messages_since(self, timestamp: int) -> list[WeChatMessage]:
         """查询指定时间戳之后的消息。
 
@@ -131,6 +174,10 @@ class WindowsDBReader(BaseDBReader):
         if self._sqlite_conn is None:
             logger.error("数据库未打开")
             return []
+
+        # 定期刷新解密副本以获取微信新写入的消息
+        if time.monotonic() - self._last_refresh > self.REFRESH_INTERVAL:
+            self.refresh()
 
         if self._has_msg_shard_tables():
             return self._query_v4_messages_since(timestamp)
@@ -226,8 +273,7 @@ class WindowsDBReader(BaseDBReader):
 
                 for row in cursor:
                     scanned += 1
-                    if self._is_self_sent_v4_row(row):
-                        continue
+                    is_self = self._is_self_sent_v4_row(row)
                     local_type = row["local_type"] or 0
                     if local_type != MSG_TYPE_TEXT:
                         continue
@@ -250,6 +296,7 @@ class WindowsDBReader(BaseDBReader):
                             room_id=username if is_group else "",
                             create_time=datetime.fromtimestamp(row["create_time"] or 0),
                             is_group=is_group,
+                            is_self=is_self,
                             at_list=[],
                         )
                     )
@@ -552,9 +599,11 @@ class WindowsDBReader(BaseDBReader):
                                     db_files.append(os.path.join(root, fname))
                         continue
 
-                    msg_dir = os.path.join(wxid_entry.path, "Msg")
-                    if os.path.isdir(msg_dir):
-                        for root, _dirs, files in os.walk(msg_dir):
+                    for db_dir_name in ("Msg", "Contact"):
+                        db_dir = os.path.join(wxid_entry.path, db_dir_name)
+                        if not os.path.isdir(db_dir):
+                            continue
+                        for root, _dirs, files in os.walk(db_dir):
                             for fname in files:
                                 if fname.endswith(".db"):
                                     db_files.append(os.path.join(root, fname))
@@ -772,15 +821,54 @@ class WindowsDBReader(BaseDBReader):
         logger.info(f"Windows 4.x 消息表缓存已构建: {len(self._msg_table_cache)} 个会话表")
         return self._msg_table_cache
 
-    @staticmethod
-    def _is_self_sent_v4_row(row) -> bool:
+    def _is_self_sent_v4_row(self, row) -> bool:
+        """识别当前账号自己发出的 Windows 4.x 消息。"""
         real_sender_id = row["real_sender_id"] or 0
-        if real_sender_id == 1:
+        current_sender_id = self._get_current_sender_id()
+        if current_sender_id and real_sender_id == current_sender_id:
+            return True
+        if current_sender_id is None and real_sender_id == 1:
             return True
         status = row["status"] or 0
         origin_source = row["origin_source"] or 0
         server_seq = row["server_seq"] or 0
         return status == 2 and origin_source == 1 and server_seq == 0
+
+    def _get_current_sender_id(self) -> Optional[int]:
+        """从 Name2Id 定位当前登录账号的 rowid。"""
+        if self._current_sender_id is not None:
+            return self._current_sender_id
+        if self._sqlite_conn is None:
+            return None
+
+        current_wxid = self._normalize_current_wxid(self.get_current_wxid())
+        if not current_wxid:
+            return None
+
+        try:
+            row = self._sqlite_conn.execute(
+                "SELECT rowid FROM Name2Id WHERE user_name = ? LIMIT 1",
+                (current_wxid,),
+            ).fetchone()
+            if row:
+                self._current_sender_id = int(row["rowid"])
+                logger.debug(
+                    "Windows 当前账号 sender_id 已识别 | wxid=%s | rowid=%s",
+                    current_wxid,
+                    self._current_sender_id,
+                )
+                return self._current_sender_id
+        except Exception as exc:
+            logger.debug("识别 Windows 当前账号 sender_id 失败: %s", exc)
+
+        return None
+
+    @staticmethod
+    def _normalize_current_wxid(wxid: str) -> str:
+        wxid = str(wxid or "")
+        if "_6c" in wxid:
+            wxid = wxid.split("_6c", 1)[0]
+        return wxid
 
     @staticmethod
     def _decode_message_content(content) -> str:
