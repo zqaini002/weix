@@ -585,6 +585,7 @@ class AutoReplyPipeline:
                 display_name,
                 force_skip=False,
                 is_group=msg.is_group,
+                target_id=receiver,
             )
             if success:
                 if self._monitor:

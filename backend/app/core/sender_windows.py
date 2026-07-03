@@ -84,6 +84,12 @@ class WindowsSender(BaseMessageSender):
         self._search_clear_y_offset = int(win_cfg.get("search_clear_y_offset", 49))
         self._search_result_x_offset = int(win_cfg.get("search_result_x_offset", 153))
         self._search_result_y_offset = int(win_cfg.get("search_result_y_offset", 130))
+        self._group_search_result_x_offset = int(
+            win_cfg.get("group_search_result_x_offset", self._search_result_x_offset)
+        )
+        self._group_search_result_y_offset = int(
+            win_cfg.get("group_search_result_y_offset", self._search_y_offset + 120)
+        )
         self._click_x_ratio = win_cfg.get("click_x_ratio", 0.5)
         self._click_y_ratio = win_cfg.get("click_y_ratio", 0.88)
         self._send_button_x_from_right = int(win_cfg.get("send_button_x_from_right", 72))
@@ -109,6 +115,7 @@ class WindowsSender(BaseMessageSender):
         receiver: str,
         force_skip: bool = False,
         is_group: bool = False,
+        target_id: str = "",
     ) -> bool:
         """发送文本消息。
 
@@ -117,6 +124,7 @@ class WindowsSender(BaseMessageSender):
             receiver: 接收者名称（用于搜索）。
             force_skip: 强制跳过搜索（macOS 兼容参数）。
             is_group: 是否为群聊（群聊始终完整搜索）。
+            target_id: 数据库会话 ID，用于发送后校验实际落点。
 
         Returns:
             True 表示发送成功。
@@ -133,6 +141,7 @@ class WindowsSender(BaseMessageSender):
             receiver,
             force_skip,
             is_group,
+            target_id,
         )
 
     async def send_image(self, path: str, receiver: str) -> bool:
@@ -168,7 +177,7 @@ class WindowsSender(BaseMessageSender):
         if receiver == self._parking_receiver:
             return
         try:
-            self._full_search(self._parking_receiver)
+            self._full_search(self._parking_receiver, is_group=False)
             self._remember_current_chat(self._parking_receiver)
         except Exception as exc:
             logger.warning("发送后停靠失败，已清空免搜索状态: %s", exc)
@@ -182,6 +191,7 @@ class WindowsSender(BaseMessageSender):
         receiver: str,
         force_skip: bool,
         is_group: bool,
+        target_id: str = "",
     ) -> bool:
         """同步消息发送，在全局锁内执行。"""
         with self._gui_lock:
@@ -195,7 +205,7 @@ class WindowsSender(BaseMessageSender):
                 skip_search = self._should_skip_search(receiver, force_skip, is_group)
 
                 if not skip_search:
-                    self._full_search(receiver)
+                    self._full_search(receiver, is_group=is_group)
                 else:
                     logger.info("免搜索发送 | receiver=%s", receiver)
 
@@ -207,8 +217,12 @@ class WindowsSender(BaseMessageSender):
                 self._paste_text(msg, input_x, input_y)
                 self._click_send_button()
 
-                if not self._verify_sent_text(msg, send_started_at):
-                    logger.error("消息发送后未在数据库中确认 | receiver=%s", receiver)
+                if not self._verify_sent_text(msg, send_started_at, target_id):
+                    logger.error(
+                        "消息发送后未在目标会话数据库中确认 | receiver=%s | target_id=%s",
+                        receiver,
+                        target_id,
+                    )
                     return False
 
                 self._remember_current_chat(receiver)
@@ -224,7 +238,13 @@ class WindowsSender(BaseMessageSender):
                 if skip_search and not force_skip:
                     logger.info("免搜索失败，重试完整搜索")
                     self.reset_search_state()
-                    return self._send_text_sync(msg, receiver, force_skip=False, is_group=is_group)
+                    return self._send_text_sync(
+                        msg,
+                        receiver,
+                        force_skip=False,
+                        is_group=is_group,
+                        target_id=target_id,
+                    )
 
                 return False
 
@@ -232,7 +252,7 @@ class WindowsSender(BaseMessageSender):
         """同步打开聊天。"""
         with self._gui_lock:
             try:
-                self._full_search(receiver)
+                self._full_search(receiver, is_group=False)
                 self.reset_search_state()
                 return True
             except Exception as exc:
@@ -372,7 +392,7 @@ class WindowsSender(BaseMessageSender):
             logger.debug("微信窗口可见性修正失败: %s", exc)
             return win
 
-    def _full_search(self, receiver: str) -> None:
+    def _full_search(self, receiver: str, is_group: bool = False) -> None:
         """完整搜索流程：激活 → 点击搜索框 → 粘贴 → 点击首个结果。"""
         self._activate_wechat()
 
@@ -382,7 +402,10 @@ class WindowsSender(BaseMessageSender):
         self._paste_text(receiver, search_x, search_y)
         time.sleep(self._search_result_delay)
 
-        self._click_first_search_result()
+        if is_group:
+            self._click_group_search_result()
+        else:
+            self._click_first_search_result()
         time.sleep(self._search_result_delay)
 
         logger.debug("完整搜索完成 | receiver=%s", receiver)
@@ -408,6 +431,15 @@ class WindowsSender(BaseMessageSender):
         x, y = self._window_offset_point(
             self._search_result_x_offset,
             self._search_result_y_offset,
+        )
+        pyautogui.click(x, y)
+        time.sleep(0.15)
+
+    def _click_group_search_result(self) -> None:
+        """点击“群聊”分区里的搜索结果，避开顶部“搜索网络结果”。"""
+        x, y = self._window_offset_point(
+            self._group_search_result_x_offset,
+            self._group_search_result_y_offset,
         )
         pyautogui.click(x, y)
         time.sleep(0.15)
@@ -510,7 +542,7 @@ class WindowsSender(BaseMessageSender):
 
     # --- 发送后校验 ---
 
-    def _verify_sent_text(self, msg: str, since_ts: int) -> bool:
+    def _verify_sent_text(self, msg: str, since_ts: int, target_id: str = "") -> bool:
         """发送后从本地消息库回读确认，避免 GUI 假阳性。"""
         if not self._verify_after_send:
             return True
@@ -518,7 +550,7 @@ class WindowsSender(BaseMessageSender):
         deadline = time.monotonic() + self._verify_timeout
         while time.monotonic() <= deadline:
             try:
-                if self._find_recent_self_text(msg, since_ts):
+                if self._find_recent_self_text(msg, since_ts, target_id):
                     return True
             except Exception as exc:
                 logger.debug("发送回读校验异常: %s", exc)
@@ -526,7 +558,7 @@ class WindowsSender(BaseMessageSender):
         return False
 
     @staticmethod
-    def _find_recent_self_text(msg: str, since_ts: int) -> bool:
+    def _find_recent_self_text(msg: str, since_ts: int, target_id: str = "") -> bool:
         from app.core.db_reader_windows import WindowsDBReader
 
         db_path, hex_key = WindowsSender._find_message_db_key()
@@ -538,7 +570,12 @@ class WindowsSender(BaseMessageSender):
         try:
             if not reader.open_db(db_path, bytes.fromhex(hex_key)):
                 return False
-            return WindowsSender._reader_has_recent_self_text(reader, msg, since_ts)
+            return WindowsSender._reader_has_recent_self_text(
+                reader,
+                msg,
+                since_ts,
+                target_id,
+            )
         finally:
             reader.close()
 
@@ -572,13 +609,26 @@ class WindowsSender(BaseMessageSender):
         return os.path.normcase(key_path) == os.path.normcase(basename)
 
     @staticmethod
-    def _reader_has_recent_self_text(reader, msg: str, since_ts: int) -> bool:
+    def _reader_has_recent_self_text(
+        reader,
+        msg: str,
+        since_ts: int,
+        target_id: str = "",
+    ) -> bool:
         normalized_msg = WindowsSender._normalize_text(msg)
         if not normalized_msg or reader._sqlite_conn is None:
             return False
 
         if reader._has_msg_shard_tables():
-            for table, _username in reader._get_v4_msg_tables():
+            tables = [
+                (table, username)
+                for table, username in reader._get_v4_msg_tables()
+                if not target_id or username == target_id
+            ]
+            if target_id and not tables:
+                logger.warning("发送回读校验未找到目标会话表 | target_id=%s", target_id)
+                return False
+            for table, _username in tables:
                 try:
                     cursor = reader._sqlite_conn.execute(
                         f'SELECT message_content, real_sender_id, status, '
@@ -599,17 +649,23 @@ class WindowsSender(BaseMessageSender):
             return False
 
         try:
+            params: list[object] = [since_ts * 1000]
+            talker_filter = ""
+            if target_id:
+                talker_filter = "AND msg_talker = ?"
+                params.append(target_id)
             cursor = reader._sqlite_conn.execute(
-                """
+                f"""
                 SELECT msg_content
                 FROM MSG
                 WHERE msg_create_time >= ?
                   AND msg_type = 1
                   AND is_sender = 1
+                  {talker_filter}
                 ORDER BY msg_create_time DESC
                 LIMIT 50
                 """,
-                (since_ts * 1000,),
+                tuple(params),
             )
             for row in cursor:
                 if WindowsSender._normalize_text(row["msg_content"]) == normalized_msg:

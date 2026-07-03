@@ -393,6 +393,7 @@ class MacOSSender(BaseMessageSender):
         receiver: str,
         force_skip: bool = False,
         is_group: bool = False,
+        target_id: str = "",
     ) -> bool:
         sender = self._group_sender if is_group else self._private_sender
         return await sender.send_text(msg, receiver, force_skip=force_skip)

@@ -100,7 +100,11 @@ async def test_flush_buffer_uses_platform_sender_with_is_group(monkeypatch):
     await pipeline._flush_buffer("room@chatroom")
 
     assert sender.sent == [
-        ("自动回复", "测试群", {"is_group": True, "force_skip": False})
+        (
+            "自动回复",
+            "测试群",
+            {"is_group": True, "force_skip": False, "target_id": "room@chatroom"},
+        )
     ]
     assert pipeline._monitor.remembered == [("room@chatroom", "自动回复")]
 
@@ -233,7 +237,11 @@ async def test_flush_buffer_cleans_reply_before_sending(monkeypatch):
     await pipeline._flush_buffer("wxid_friend")
 
     assert sender.sent == [
-        ("好嘞我知道了", "朋友", {"is_group": False, "force_skip": False})
+        (
+            "好嘞我知道了",
+            "朋友",
+            {"is_group": False, "force_skip": False, "target_id": "wxid_friend"},
+        )
     ]
     assert "\n" not in sender.sent[0][0]
     assert "😄" not in sender.sent[0][0]

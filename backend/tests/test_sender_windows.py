@@ -5,6 +5,7 @@
 """
 
 import os
+import sqlite3
 import sys
 import threading
 import time
@@ -110,16 +111,20 @@ async def test_send_text_group_chat_always_full_search():
     sender = _make_sender()
     _mock_window(sender)
 
-    # 两次群聊，每次都应完整搜索，但不使用快捷键。
+    # 两次群聊，每次都应完整搜索；点击“群聊”分区结果，避开顶部搜一搜。
     await sender.send_text("消息1", "测试群", is_group=True)
     pyautogui.hotkey.assert_not_called()
     pyautogui.press.assert_not_called()
+    assert (153, 169) in [call.args for call in pyautogui.click.call_args_list]
 
     pyautogui.hotkey.reset_mock()
+    pyautogui.press.reset_mock()
+    pyautogui.click.reset_mock()
 
     await sender.send_text("消息2", "测试群", is_group=True)
     pyautogui.hotkey.assert_not_called()
     pyautogui.press.assert_not_called()
+    assert (153, 169) in [call.args for call in pyautogui.click.call_args_list]
 
 
 @pytest.mark.asyncio
@@ -219,3 +224,58 @@ def test_ensure_window_visible_moves_offscreen_window():
     args = set_window_pos.call_args[0]
     assert args[2] == 990
     assert args[3] == 47
+
+
+def test_reader_has_recent_self_text_requires_target_v4_table():
+    from app.core.sender_windows import WindowsSender
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute(
+        "CREATE TABLE Msg_group (local_id INTEGER, create_time INTEGER, real_sender_id INTEGER, "
+        "message_content TEXT, local_type INTEGER, status INTEGER, origin_source INTEGER, server_seq INTEGER)"
+    )
+    conn.execute(
+        "CREATE TABLE Msg_private (local_id INTEGER, create_time INTEGER, real_sender_id INTEGER, "
+        "message_content TEXT, local_type INTEGER, status INTEGER, origin_source INTEGER, server_seq INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO Msg_private VALUES (1, 100, 1, '发错窗口了', 1, 3, 0, 10)"
+    )
+
+    class Reader:
+        _sqlite_conn = conn
+
+        def _has_msg_shard_tables(self):
+            return True
+
+        def _get_v4_msg_tables(self):
+            return [
+                ("Msg_group", "room@chatroom"),
+                ("Msg_private", "wxid_friend"),
+            ]
+
+        def _is_self_sent_v4_row(self, row):
+            return True
+
+        def _decode_message_content(self, content):
+            return str(content or "")
+
+    assert (
+        WindowsSender._reader_has_recent_self_text(
+            Reader(),
+            "发错窗口了",
+            90,
+            target_id="room@chatroom",
+        )
+        is False
+    )
+    assert (
+        WindowsSender._reader_has_recent_self_text(
+            Reader(),
+            "发错窗口了",
+            90,
+            target_id="wxid_friend",
+        )
+        is True
+    )
