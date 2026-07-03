@@ -6,9 +6,9 @@
 
 - **收消息**：直接读取微信本地 SQLite 数据库（纯文件 I/O，微信进程无感知）
 - **AI 回复**：LangChain 编排大模型，支持多轮对话、工具调用、意图识别
-- **发消息**：
-  - Windows：WeChatFerry HTTP API
-  - macOS：AppleScript 模拟键盘输入（与真人操作无异）
+- **发消息**：两个平台均采用 GUI 模拟操作，不注入、不 Hook，与真人操作无异
+  - Windows：pyautogui 模拟鼠标点击 + 右键粘贴
+  - macOS：AppleScript 模拟键盘输入
 - **可视化管理**：Vue3 Web 后台，配置 AI、规则、模板，开箱即用
 
 ## 功能
@@ -43,10 +43,10 @@
                                           │              │              │
                                           └──────────────┼──────────────┘
                                                          ▼
-                                                  消息发送层
+                                                  消息发送层（GUI 模拟）
                                               ┌─────────┴─────────┐
                                               ▼                   ▼
-                                       Windows (WCF)      macOS (AppleScript)
+                                    Windows (pyautogui)   macOS (AppleScript)
 ```
 
 ## 平台支持
@@ -56,8 +56,8 @@
 | 微信版本 | PC 微信 3.9.12.51 | Mac 微信 4.x (App Store) |
 | DB 路径 | `Documents/WeChat Files/<wxid>/Msg/` | `~/Library/Containers/com.tencent.xinWeChat/...` |
 | 密钥提取 | `ReadProcessMemory` (Win32 API) | `mach_vm_read_overwrite` (Mach VM) |
-| 消息发送 | WeChatFerry HTTP (:10010) | AppleScript 模拟键盘输入 |
-| 发送风险 | 中等 | 极低 |
+| 消息发送 | pyautogui 模拟鼠标点击 + 右键粘贴 | AppleScript 模拟键盘输入 |
+| 发送风险 | 极低（无注入，纯 GUI 模拟） | 极低（与真人操作无异） |
 | 管理员权限 | 需要 | 需要 |
 
 ## 技术栈
@@ -105,13 +105,10 @@ sudo bash scripts/start.sh
 ### Windows
 
 ```cmd
-REM 3. 启动 WeChatFerry HTTP 服务（管理员权限）
-python -m wcfhttp
-
-REM 4. 环境初始化
+REM 3. 环境初始化
 scripts\setup.bat
 
-REM 5. 以管理员权限启动
+REM 4. 以管理员权限启动
 scripts\start.bat
 ```
 
@@ -170,10 +167,10 @@ weix/
 ## 防封号策略
 
 1. **收消息零风险**：只读数据库文件，微信进程完全无感知
-2. **频率控制**：全局每分钟 ≤ 20 条，单会话冷却 30s
-3. **行为模拟**：发送间隔随机化（Win 15-45s / Mac 8-20s）
-4. **熔断保护**：连续失败 3 次暂停 5 分钟
-5. **macOS 天然优势**：AppleScript 键盘模拟 = 真人操作，无法区分
+2. **发消息零注入**：Windows / macOS 均采用 GUI 模拟操作，不注入 DLL、不 Hook 进程，与真人操作无异
+3. **频率控制**：全局每分钟 ≤ 20 条，单会话冷却 30s
+4. **行为模拟**：发送间隔随机化（Win 15-45s / Mac 8-20s）
+5. **熔断保护**：连续失败 3 次暂停 5 分钟
 
 ## License
 
