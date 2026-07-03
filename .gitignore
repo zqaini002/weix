@@ -39,6 +39,7 @@ frontend/dist/
 # Data - 敏感运行时数据，禁止提交或打包
 data/
 !data/.gitkeep
+backend/data/
 
 # Config - 本地配置含个人信息和密钥，仅提交模板
 config/config.yaml
