@@ -32,6 +32,9 @@ htmlcov/
 frontend/node_modules/
 frontend/dist/
 
+# Build artifacts
+build_fixed/
+
 # MCP & Dev tools
 .playwright-mcp/
 .spec-workflow/
