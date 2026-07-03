@@ -40,6 +40,9 @@ frontend/dist/
 CLAUDE.md
 .superpowers/
 
+# Third-party reference packages
+tmp_pkg/
+
 # Data - 敏感运行时数据，禁止提交或打包
 data/
 !data/.gitkeep

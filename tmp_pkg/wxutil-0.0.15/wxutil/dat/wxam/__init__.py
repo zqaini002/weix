@@ -1,1 +1,0 @@
-from .wxgf import wxam_to_image
