@@ -60,43 +60,56 @@
 
 ## 快速开始
 
+### 1. 克隆项目
+
+```bash
+git clone <repo-url> weix
+cd weix
+```
+
+### 2. 创建本地配置文件
+
+```bash
+# 复制配置模板
+cp config/config.example.yaml config/config.yaml
+
+# 复制环境变量模板
+cp .env.example .env
+```
+
+然后编辑这两个文件，填入你的 API Key 等信息。
+
 ### macOS
 
 ```bash
-# 1. 环境初始化
+# 3. 环境初始化
 bash scripts/setup.sh
 
-# 2. 编辑配置
-vim config/config.yaml
-
-# 3. 授予辅助功能权限
+# 4. 授予辅助功能权限
 # 系统偏好设置 → 隐私与安全性 → 辅助功能 → 添加终端
 
-# 4. 启动（首次提取密钥需 sudo）
+# 5. 启动（首次提取密钥需 sudo）
 sudo bash scripts/start.sh
 ```
 
 ### Windows
 
 ```cmd
-REM 1. 启动 WeChatFerry HTTP 服务（管理员权限）
+REM 3. 启动 WeChatFerry HTTP 服务（管理员权限）
 python -m wcfhttp
 
-REM 2. 环境初始化
+REM 4. 环境初始化
 scripts\setup.bat
 
-REM 3. 编辑配置
-notepad config\config.yaml
-
-REM 4. 以管理员权限启动
+REM 5. 以管理员权限启动
 scripts\start.bat
 ```
 
-首次运行会提取数据库解密密钥并保存到 `data/all_keys.json`。
+首次运行会**自动**从本机微信进程内存中提取数据库解密密钥，保存到 `data/all_keys.json`。如果自动提取失败，可手动设置环境变量 `WEIX_WECHAT_DB_KEY`（64 位十六进制密钥）。
 
 ## 管理后台
 
-访问 http://localhost:5173，默认登录密码在 `config/config.yaml` 中配置。
+访问 http://localhost:5173，默认用户名/密码在 `config/config.yaml` 中配置（从 `config/config.example.yaml` 复制后修改）。
 
 - **仪表盘**：在线状态、消息数、活跃群聊、订单数
 - **统计报告**：发言排行、时段分布、关键词、AI 摘要
@@ -111,7 +124,7 @@ scripts\start.bat
 
 ## 配置文件
 
-主配置 `config/config.yaml`，关键配置项：
+主配置 `config/config.yaml`（从 `config/config.example.yaml` 复制），关键配置项：
 
 | 配置项 | 说明 |
 |--------|------|

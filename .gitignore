@@ -36,6 +36,10 @@ frontend/dist/
 .playwright-mcp/
 .spec-workflow/
 
+# AI assistant config (local only)
+CLAUDE.md
+.superpowers/
+
 # Data - 敏感运行时数据，禁止提交或打包
 data/
 !data/.gitkeep
