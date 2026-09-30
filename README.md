@@ -1,6 +1,38 @@
-# Weix — 微信全 AI 自动回复机器人
+<div align="center">
 
-接入大模型，让 AI 替你自动回微信。**不封号**。
+# Weix
+
+### 让 AI 接入你的微信回复流程
+
+本地数据库收消息 · 视觉模型定位 · 可配置的 AI 回复
+
+[![Build](https://github.com/zqaini002/weix/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/zqaini002/weix/actions/workflows/build.yml)
+[![Stars](https://img.shields.io/github/stars/zqaini002/weix?style=flat&color=14b8a6)](https://github.com/zqaini002/weix/stargazers)
+[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
+
+**[下载测试版](https://github.com/zqaini002/weix/releases/tag/nightly) · [全部版本](https://github.com/zqaini002/weix/releases) · [快速开始](#快速开始) · [反馈问题](https://github.com/zqaini002/weix/issues)**
+
+</div>
+
+## 下载与版本
+
+| 平台 | 自动构建下载 | 使用方式 |
+| --- | --- | --- |
+| Windows | [Weix-Windows.zip](https://github.com/zqaini002/weix/releases/download/nightly/Weix-Windows.zip) | 解压完整目录，以管理员权限运行 `Weix.exe`，保留 `_internal` 目录 |
+| macOS | [Weix-macOS.dmg](https://github.com/zqaini002/weix/releases/download/nightly/Weix-macOS.dmg) | 配置本机权限；微信界面自动回复仍待 Mac 实机验收 |
+
+`master` 构建成功后自动更新 **Releases → 最新测试版**；`v*` 标签构建成功后发布版本 Release。首次构建发布完成后下载链接生效。构建包的管理页面为 **http://127.0.0.1:8000**。
+
+配置模板随程序提供，API key 和白名单由你在本机填写。发布包不包含开发者的密钥或聊天数据。GUI 自动化需要可操作的微信窗口，频率限制和校验机制不能保证账号不受平台限制。
+
+## 已验证的进展
+
+| 项目 | 当前结果（2026-09-30） |
+| --- | --- |
+| Windows 微信 | 4.1.15.13：本机数据库密钥恢复、数据库监听、视觉定位和发送回读已验证 |
+| 切换会话测试 | 两个私聊交替三轮，6 条消息均回读到正确会话 |
+| 后端测试 | 本机测试记录：166 项通过，4 项跳过 |
+| macOS | 同步代码与模拟测试已具备；界面流程待实机验证 |
 
 ## 核心原理
 
@@ -57,7 +89,7 @@
 | DB 路径 | `Documents/xwechat_files/<账号>/db_storage/`，兼容旧 `WeChat Files/<账号>/Msg/` | `~/Library/Containers/com.tencent.xinWeChat/...` |
 | 密钥提取 | `ReadProcessMemory` (Win32 API) | `mach_vm_read_overwrite` (Mach VM) |
 | 消息发送 | pyautogui 模拟鼠标点击 + 右键粘贴 | AppleScript 模拟键盘输入 |
-| 发送风险 | 极低（无注入，纯 GUI 模拟） | 极低（与真人操作无异） |
+| 发送校验 | 前台与标题核对；发送后按会话 ID 回读数据库 | 标题核对；待实机验收 |
 | 管理员权限 | 需要 | 需要 |
 
 ## 技术栈
@@ -73,7 +105,7 @@
 ### 1. 克隆项目
 
 ```bash
-git clone <repo-url> weix
+git clone https://github.com/zqaini002/weix.git
 cd weix
 ```
 
@@ -190,8 +222,8 @@ weix/
 
 ## 防封号策略
 
-1. **收消息零风险**：只读数据库文件，微信进程完全无感知
-2. **发消息零注入**：Windows / macOS 均采用 GUI 模拟操作，不注入 DLL、不 Hook 进程，与真人操作无异
+1. **只读收消息**：从本机数据库读取消息，并验证数据库密钥
+2. **GUI 发送**：Windows / macOS 均采用界面操作；发送前核对联系人和聊天标题
 3. **频率控制**：全局每分钟 ≤ 20 条，单会话冷却 30s
 4. **行为模拟**：发送间隔随机化（Win 15-45s / Mac 8-20s）
 5. **熔断保护**：连续失败 3 次暂停 5 分钟
