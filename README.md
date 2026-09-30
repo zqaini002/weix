@@ -168,7 +168,7 @@ Windows 微信 4.1.15.13 已适配 `Config.Cipher` 内存缓存：只读恢复�
   --package-dir dist/Weix415Reply --keys data/all_keys.json
 ```
 
-原始测试报告、日志、截图和数据库密钥保存在本机 `data/`，不作为公开文档提交。发现历史泄露时参考 [Git 历史敏感数据清理](docs/security-history-cleanup.md)；仅删除当前文件或添加 `.gitignore` 不会清除旧提交。
+原始测试报告、日志、截图和数据库密钥保存在本机 `data/`，不作为公开文档提交。发现历史泄露时须清理 Git 历史并更换泄露的凭据；仅删除当前文件或添加 `.gitignore` 不会清除旧提交。
 
 ## 管理后台
 

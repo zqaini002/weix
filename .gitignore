@@ -41,6 +41,8 @@ build_fixed/
 
 # AI assistant config (local only)
 CLAUDE.md
+AGENTS.md
+/docs/
 .superpowers/
 
 # Third-party reference packages
