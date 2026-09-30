@@ -1,0 +1,8 @@
+Weix uses the Config.Cipher object layout and XOR mask documented in
+fanyuantaier/wechatauto-replica's wechatauto/db.py (Apache License 2.0).
+Source: https://github.com/fanyuantaier/wechatauto-replica/blob/main/wechatauto/db.py
+Retrieved: 2026-09-30
+
+Weix implements its own bounded, cancellable scan and validates every key
+against the corresponding local SQLCipher database before accepting it.
+The upstream license is included in LICENSE in this directory.

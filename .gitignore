@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+*.manifest
+*.spec
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE & Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Build artifacts
+build_fixed/
+
+# MCP & Dev tools
+.playwright-mcp/
+.spec-workflow/
+
+# AI assistant config (local only)
+CLAUDE.md
+.superpowers/
+
+# Third-party reference packages
+tmp_pkg/
+
+# Data - 敏感运行时数据，禁止提交或打包
+data/
+!data/.gitkeep
+backend/data/
+
+# Config - 本地配置含个人信息和密钥，仅提交模板
+config/config.yaml
+
+# Environment
+.env
+.env.local
+.env.*
+!.env.example
+all_keys.json
+*.log
