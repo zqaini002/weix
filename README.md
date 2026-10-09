@@ -8,11 +8,13 @@
 
 [![Build](https://github.com/zqaini002/weix/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/zqaini002/weix/actions/workflows/build.yml)
 [![Stars](https://img.shields.io/github/stars/zqaini002/weix?style=flat&color=14b8a6)](https://github.com/zqaini002/weix/stargazers)
-[![License](https://img.shields.io/badge/license-MIT-blue)](#license)
+[![Usage](https://img.shields.io/badge/usage-Non--commercial-orange)](DISCLAIMER.md)
 
 **[下载测试版](https://github.com/zqaini002/weix/releases/tag/nightly) · [全部版本](https://github.com/zqaini002/weix/releases) · [快速开始](#快速开始) · [反馈问题](https://github.com/zqaini002/weix/issues)**
 
 </div>
+
+> **使用声明：仅供非商业学习、技术研究和个人娱乐参考，禁止违法、侵权及未经授权的活动。第三方自动化可能违反微信规则，本项目不保证账号安全或不被封禁。使用前请阅读 [使用限制与免责声明](DISCLAIMER.md)。**
 
 ## 下载与版本
 
@@ -228,6 +230,6 @@ weix/
 4. **行为模拟**：发送间隔随机化（Win 15-45s / Mac 8-20s）
 5. **熔断保护**：连续失败 3 次暂停 5 分钟
 
-## License
+## 使用限制与免责声明
 
-MIT
+本项目当前自有部分仅供非商业学习、技术研究和个人娱乐参考，不得用于违法活动。完整条款见 [DISCLAIMER.md](DISCLAIMER.md)。第三方组件仍适用其各自许可证，历史版本已经有效授予的许可不因新声明而被追溯撤回。
