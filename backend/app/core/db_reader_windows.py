@@ -872,14 +872,8 @@ class WindowsDBReader(BaseDBReader):
 
     @staticmethod
     def _decode_message_content(content) -> str:
-        if content is None:
-            return ""
-        if isinstance(content, bytes):
-            try:
-                return content.decode("utf-8", errors="replace")
-            except Exception:
-                return str(content)
-        return str(content)
+        from app.core.message_content import decode_message_content
+        return decode_message_content(content)
 
     @staticmethod
     def _is_garbled(text: str) -> bool:

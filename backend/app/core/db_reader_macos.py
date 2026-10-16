@@ -316,13 +316,8 @@ class MacOSDBReader(BaseDBReader):
                         if local_type != 1:
                             continue
 
-                        content = row["message_content"] or ""
-                        if isinstance(content, bytes):
-                            try:
-                                content = content.decode("utf-8", errors="replace")
-                            except Exception:
-                                content = str(content)
-                        content = str(content)
+                        from app.core.message_content import decode_message_content
+                        content = decode_message_content(row["message_content"])
                         if not content.strip():
                             continue
                         if MacOSDBReader._is_garbled(content):
@@ -589,13 +584,8 @@ class MacOSDBReader(BaseDBReader):
                     if not MacOSDBReader._is_self_sent_row(row):
                         continue
 
-                    content = row["message_content"] or ""
-                    if isinstance(content, bytes):
-                        try:
-                            content = content.decode("utf-8", errors="replace")
-                        except Exception:
-                            content = str(content)
-                    content = str(content).strip()
+                    from app.core.message_content import decode_message_content
+                    content = decode_message_content(row["message_content"]).strip()
                     if not content or len(content) < 2:
                         continue
                     if MacOSDBReader._is_garbled(content):
