@@ -61,6 +61,8 @@ def setup(monkeypatch):
         sent.append(True)
         vision.bubbles.append(VisualBubble("self", pasted[-1]))
     sender._click_send_button = click_send
+    sender._snapshot_target_local_id = lambda target_id: 0
+    sender._find_recent_self_text = lambda text, since, target_id, **kwargs: bool(sent and pasted[-1] == text)
     monkeypatch.setattr(module.time, "sleep", lambda _: None)
     monkeypatch.setattr(module.pyautogui, "click", lambda *args: None)
     monkeypatch.setattr(module.pyautogui, "screenshot", lambda region: Image.new("RGB", (region[2], region[3])))

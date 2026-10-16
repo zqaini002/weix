@@ -507,6 +507,8 @@ def main():
 
     window = MainWindow()
     window.show()
+    if "--start" in sys.argv:
+        QTimer.singleShot(0, window._on_start)
     sys.exit(app.exec())
 
 

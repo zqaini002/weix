@@ -536,3 +536,41 @@ async def test_facade_visual_send_stops_on_capture_failure_or_changed_bounds(mon
     monkeypatch.setattr(capture, "capture_window_region_png", resized_capture)
     assert not await sender.send_text("never", "小号")
     assert "vision_click" not in operations
+
+
+@pytest.mark.asyncio
+async def test_facade_group_send_uses_guarded_group_compose(monkeypatch):
+    from unittest.mock import MagicMock, AsyncMock
+    from app.core.vision_client import SearchHit, VisualBubble
+    import app.core.screenshot_helper as capture
+    vision = MagicMock()
+    vision.locate_search_result.return_value = SearchHit(60, 80, "\u59731\u6d4b\u8bd5")
+    vision.classify_chat_title.return_value = "\u59731\u6d4b\u8bd5"
+    vision.read_visible_messages.return_value = [VisualBubble("self", "relay")]
+    sender = MacOSSender(vision_client=vision)
+    sender._private_sender._search_result_delay = 0
+    bounds = {"X": 20, "Y": 30, "Width": 900, "Height": 700}
+    monkeypatch.setattr(capture, "capture_window_region_png", lambda rect: (b"PNG", bounds, (rect[2], rect[3])))
+    sender._private_sender._run = AsyncMock(return_value=True)
+    sender._group_sender._run = AsyncMock(return_value=True)
+    for target_id in ("", "wxid_contact"):
+        assert not await sender.send_text("relay", "\u59731\u6d4b\u8bd5", is_group=True, target_id=target_id)
+    vision.locate_search_result.assert_not_called()
+    assert await sender.send_text("relay", "\u59731\u6d4b\u8bd5", is_group=True, target_id="123@chatroom")
+    assert vision.locate_search_result.call_args.kwargs == {"is_group": True}
+    script = sender._group_sender._run.call_args.args[0]
+    assert 'keystroke "f" using command down' not in script
+    assert 'relay' in script
+    sender._group_sender._run.assert_called_once()
+    vision.classify_chat_title.return_value = "OTHER"
+    assert not await sender.send_text("relay", "\u59731\u6d4b\u8bd5", is_group=True, target_id="123@chatroom")
+    sender._group_sender._run.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_facade_group_open_never_falls_back_to_blind_search():
+    from unittest.mock import AsyncMock
+    sender = MacOSSender()
+    sender._group_sender.open_chat = AsyncMock(return_value=True)
+    assert not await sender.open_chat("group", is_group=True)
+    sender._group_sender.open_chat.assert_not_called()

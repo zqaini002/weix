@@ -113,7 +113,7 @@ async def test_start_reports_missing_key_or_allowlist(monkeypatch):
     monkeypatch.setattr(module.Platform, "get", lambda: SimpleNamespace(sender=object(), is_macos=False))
     pipeline = AutoReplyPipeline()
     assert not await pipeline.start()
-    assert "private_whitelist" in pipeline.disabled_reason
+    assert "接收范围" in pipeline.disabled_reason
     config.auto_reply["private_whitelist"] = ["任意联系人"]
     pipeline = AutoReplyPipeline()
     assert not await pipeline.start()
@@ -121,7 +121,7 @@ async def test_start_reports_missing_key_or_allowlist(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("private_mode", ["whitelist", "all", "none"])
+@pytest.mark.parametrize("private_mode", ["whitelist", "none"])
 async def test_empty_web_whitelist_stays_stopped_with_database_source(monkeypatch, private_mode):
     import app.core.auto_reply_pipeline as module
     config = SimpleNamespace(
@@ -133,7 +133,45 @@ async def test_empty_web_whitelist_stays_stopped_with_database_source(monkeypatc
     pipeline = AutoReplyPipeline()
 
     assert not await pipeline.start()
-    assert "private_whitelist" in pipeline.disabled_reason
+    assert "接收范围" in pipeline.disabled_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply_config", [
+    {"private_chat_mode": "all", "group_chat_mode": "none"},
+    {"private_chat_mode": "none", "group_chat_mode": "whitelist", "group_whitelist": ["room@chatroom"]},
+])
+async def test_start_all_private_or_group_only_does_not_require_private_names(monkeypatch, reply_config):
+    import app.core.auto_reply_pipeline as module
+    config = SimpleNamespace(auto_reply=reply_config, ai={"api_key": "test"}, monitor={}, windows_sender={})
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    monkeypatch.setattr(module.Platform, "get", lambda: SimpleNamespace(sender=object(), is_macos=False))
+    pipeline = AutoReplyPipeline()
+    monkeypatch.setattr(pipeline, "_choose_source", lambda *_: (None, None))
+    assert not await pipeline.start()
+    assert "消息数据库" in pipeline.disabled_reason
+
+
+@pytest.mark.asyncio
+async def test_order_intake_receives_private_message_before_ai_buffer(monkeypatch):
+    import app.core.auto_reply_pipeline as module
+    config = SimpleNamespace(auto_reply={"enabled": True, "private_chat_mode": "all", "order_intake": {"enabled": True}})
+    monkeypatch.setattr(module, "get_config", lambda: config)
+    pipeline = AutoReplyPipeline()
+    handled = []
+
+    async def handle(msg):
+        handled.append(msg.content)
+        return True
+
+    async def persist(msg):
+        pass
+
+    pipeline._order_intake = SimpleNamespace(handle=handle)
+    monkeypatch.setattr(pipeline, "_persist_message", persist)
+    await pipeline._handle_message(WeChatMessage(msg_id="order-1", msg_type=1, content="在吗？", sender="wxid_order"))
+    assert handled == ["在吗？"]
+    assert pipeline._buffer == {}
 
 
 class FakeRuleEngine:
@@ -460,3 +498,18 @@ def test_clean_reply_for_wechat_removes_extra_spaces_newlines_and_emoji():
     text = AutoReplyPipeline._clean_reply_for_wechat("好 的\n\n我 知道 了  😄  ！")
 
     assert text == "好的我知道了！"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("names", [{}, {"wxid_friend": "同名", "wxid_other": "同名"}])
+async def test_order_mode_consumes_unsearchable_private_sender_without_ai(monkeypatch, names):
+    config = SimpleNamespace(auto_reply={"enabled": True, "private_chat_mode": "all", "order_intake": {"enabled": True}})
+    monkeypatch.setattr("app.core.auto_reply_pipeline.get_config", lambda: config)
+    pipeline = AutoReplyPipeline()
+    pipeline._name_map = names
+    async def persist(msg):
+        pass
+    monkeypatch.setattr(pipeline, "_persist_message", persist)
+    await pipeline._handle_message(_private_msg())
+    assert pipeline._buffer == {}
+    assert pipeline._buffer_timers == {}

@@ -62,6 +62,7 @@ def _make_sender():
     sender._type_delay = 0
     sender._skip_search_ttl = 60
     sender._verify_after_send = False
+    sender._snapshot_target_local_id = MagicMock(return_value=10)
     return sender
 
 
@@ -138,7 +139,7 @@ async def test_automatic_reply_confirms_exact_database_target_without_message_sc
     sender._verify_sent_text = MagicMock(return_value=True)
     with patch("app.core.sender_windows.time.time", return_value=1234):
         assert await sender.send_text("测试", "小号", target_id="wxid_small")
-    sender._verify_sent_text.assert_called_once_with("测试", 1234, "wxid_small", required=True)
+    sender._verify_sent_text.assert_called_once_with("测试", 1234, "wxid_small", required=True, after_local_id=10)
     sender._confirm_visual_send.assert_not_called()
 
 
@@ -412,3 +413,140 @@ def test_reader_has_recent_self_text_requires_target_v4_table():
         )
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_group_send_requires_exact_id_and_database_echo():
+    from app.core.vision_client import SearchHit
+    sender = _make_sender()
+    _mock_window(sender)
+    sender._vision_client.locate_search_result.return_value = SearchHit(80, 100, "\u59731\u6d4b\u8bd5")
+    sender._vision_client.classify_chat_title.return_value = "\u59731\u6d4b\u8bd5"
+    sender._verify_sent_text = MagicMock(return_value=True)
+    for target_id in ("", "wxid_contact"):
+        assert not await sender.send_text("relay", "\u59731\u6d4b\u8bd5", is_group=True, target_id=target_id)
+    sender._vision_client.locate_search_result.assert_not_called()
+    with patch("app.core.sender_windows.time.time", return_value=1234):
+        assert await sender.send_text("relay", "\u59731\u6d4b\u8bd5", is_group=True, target_id="123@chatroom")
+    assert sender._vision_client.locate_search_result.call_args.kwargs == {"is_group": True}
+    sender._verify_sent_text.assert_called_once_with("relay", 1234, "123@chatroom", required=True, after_local_id=10)
+    sender._confirm_visual_send.assert_not_called()
+    sender._verify_sent_text.return_value = False
+    assert not await sender.send_text("relay", "\u59731\u6d4b\u8bd5", is_group=True, target_id="123@chatroom")
+    sender._confirm_visual_send.assert_not_called()
+
+
+def test_database_key_matching_requires_absolute_account_path():
+    from app.core.sender_windows import WindowsSender
+    target = "C:/wechat/account1/db_storage/message/message_0.db"
+    assert WindowsSender._key_matches_db_path(target.upper(), target)
+    for key_path in ("message_0.db", "message/message_0.db", "db_storage/message/message_0.db", "C:/wechat/account2/db_storage/message/message_0.db"):
+        assert not WindowsSender._key_matches_db_path(key_path, target)
+
+
+def test_database_confirmation_uses_platform_selected_account_keys(monkeypatch):
+    from types import SimpleNamespace
+    from app.core.sender_windows import WindowsSender
+    from app.core.platform import Platform
+    from app.core.db_reader_windows import WindowsDBReader
+    from app.core.key_extractor_windows import WindowsKeyExtractor
+    selected = "C:/wechat/account1/db_storage/message/message_0.db"
+    other = "C:/wechat/account2/db_storage/message/message_0.db"
+    keys = {selected: "aa", "C:/wechat/account1/db_storage/contact/contact.db": "bb", other: "cc"}
+    extractor = SimpleNamespace(load_keys=lambda: keys, select_account_keys=WindowsKeyExtractor.select_account_keys)
+    monkeypatch.setattr(Platform, "get", lambda: SimpleNamespace(key_extractor=extractor))
+    monkeypatch.setattr(WindowsDBReader, "find_database_files", lambda: [other, selected])
+    assert WindowsSender._find_message_db_key() == (selected, "aa")
+    keys["C:/wechat/account2/db_storage/contact/contact.db"] = "dd"
+    assert WindowsSender._find_message_db_key() == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_group_inspect_and_open_require_visual_result_and_title():
+    from app.core.vision_client import SearchHit
+    sender = _make_sender()
+    _mock_window(sender)
+    sender._vision_client.locate_search_result.return_value = SearchHit(80, 100, "group")
+    sender._vision_client.classify_chat_title.return_value = "group"
+    assert await sender.inspect_chat("group", ["group"], is_group=True)
+    assert await sender.open_chat("group", is_group=True)
+    sender._vision_client.locate_search_result.return_value = None
+    assert not await sender.open_chat("group", is_group=True)
+    sender._vision_client = None
+    assert not await sender.open_chat("group", is_group=True)
+
+
+@pytest.mark.asyncio
+async def test_group_send_stops_when_foreground_changes_during_search():
+    from app.core.vision_client import SearchHit
+    sender = _make_sender()
+    window = FakeWindow(hwnd=42)
+    _mock_window(sender, window)
+    with patch.dict(sys.modules, {"win32gui": MagicMock(GetForegroundWindow=MagicMock(return_value=42))}):
+        import win32gui
+        def located(*args, **kwargs):
+            win32gui.GetForegroundWindow.return_value = 99
+            return SearchHit(80, 100, "group")
+        sender._vision_client.locate_search_result.side_effect = located
+        sender._vision_client.classify_chat_title.return_value = "group"
+        sender._verify_sent_text = MagicMock(return_value=True)
+        assert not await sender.send_text("never", "group", is_group=True, target_id="123@chatroom")
+        assert all(c.args != ("never",) for c in pyperclip.copy.call_args_list)
+        sender._verify_sent_text.assert_not_called()
+
+
+def _baseline_reader():
+    from types import SimpleNamespace
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE Msg_target (local_id INTEGER, create_time INTEGER, real_sender_id INTEGER, message_content TEXT, local_type INTEGER, status INTEGER, origin_source INTEGER, server_seq INTEGER)")
+    return SimpleNamespace(_sqlite_conn=conn, _has_msg_shard_tables=lambda: True,
+        _get_v4_msg_tables=lambda: [("Msg_target", "123@chatroom")],
+        _is_self_sent_v4_row=lambda row: row["real_sender_id"] == 1,
+        _decode_message_content=lambda content: content)
+
+
+def test_database_confirmation_accepts_new_local_id_despite_clock_skew():
+    from app.core.sender_windows import WindowsSender
+    reader = _baseline_reader()
+    reader._sqlite_conn.execute("INSERT INTO Msg_target VALUES (11, 50, 1, 'relay', 1, 2, 1, 99)")
+    assert WindowsSender._reader_has_recent_self_text(reader, "relay", 100, "123@chatroom", after_local_id=10)
+    assert not WindowsSender._reader_has_recent_self_text(reader, "relay", 100, "wrong@chatroom", after_local_id=10)
+    reader._sqlite_conn.close()
+
+
+def test_database_confirmation_does_not_reuse_identical_baseline_row():
+    from app.core.sender_windows import WindowsSender
+    reader = _baseline_reader()
+    reader._sqlite_conn.execute("INSERT INTO Msg_target VALUES (10, 200, 1, 'relay', 1, 2, 1, 99)")
+    assert not WindowsSender._reader_has_recent_self_text(reader, "relay", 100, "123@chatroom", after_local_id=10)
+    reader._sqlite_conn.execute("INSERT INTO Msg_target VALUES (11, 200, 2, 'relay', 1, 2, 1, 99)")
+    assert not WindowsSender._reader_has_recent_self_text(reader, "relay", 100, "123@chatroom", after_local_id=10)
+    reader._sqlite_conn.close()
+
+
+@pytest.mark.asyncio
+async def test_required_database_snapshot_failure_prevents_message_composition():
+    sender = _make_sender()
+    _mock_window(sender)
+    sender._snapshot_target_local_id = MagicMock(return_value=None)
+    sender._verify_sent_text = MagicMock(return_value=False)
+    sender._click_send_button = MagicMock()
+    assert not await sender.send_text("never", "小号", target_id="wxid_target")
+    assert all(c.args != ("never",) for c in pyperclip.copy.call_args_list)
+    sender._click_send_button.assert_not_called()
+
+
+def test_target_snapshot_reads_exact_table_baseline_and_closes_reader(monkeypatch):
+    from app.core.sender_windows import WindowsSender
+    from app.core.db_reader_windows import WindowsDBReader
+    reader = _baseline_reader()
+    reader._sqlite_conn.execute("INSERT INTO Msg_target VALUES (10, 200, 1, 'relay', 1, 2, 1, 99)")
+    reader.open_db = MagicMock(return_value=True)
+    reader.close = MagicMock()
+    monkeypatch.setattr(WindowsSender, "_find_message_db_key", lambda: ("C:/fake/message_0.db", "aa"))
+    monkeypatch.setattr("app.core.db_reader_windows.WindowsDBReader", lambda: reader)
+    assert WindowsSender._snapshot_target_local_id("123@chatroom") == 10
+    assert WindowsSender._snapshot_target_local_id("wrong@chatroom") is None
+    assert reader.close.call_count == 2
+    reader._sqlite_conn.close()

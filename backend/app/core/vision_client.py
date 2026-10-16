@@ -61,13 +61,32 @@ class VisionClient:
             return None
 
     def locate_search_result(
-        self, image_png: bytes, target: str, image_size: tuple[int, int]
+        self, image_png: bytes, target: str, image_size: tuple[int, int], is_group: bool = False
     ) -> SearchHit | None:
         if not target or len(image_size) != 2:
             return None
         width, height = image_size
+        result_type = "group" if is_group else "contact"
+        count_field = "matching_group_count" if is_group else "matching_contact_count"
+        group_instruction = (
+            f"Locate the WeChat GROUP search result for {json.dumps(target, ensure_ascii=False)} "
+            f"in this {width}x{height} screenshot. Count ALL matching group rows under Groups "
+            "(\u7fa4\u804a) or Recent/Frequently Used, including duplicate names. "
+            "A group may appear ONLY under Frequently Used (最常使用), with a composite "
+            "multi-person avatar and no Groups heading. Use that visual group avatar "
+            "as evidence; do not require a Groups section to be present. "
+            "Exclude contacts, chat-history matches, search input, favorites and web results. "
+            "Return JSON {found:boolean,x:integer,y:integer,visible_name:string,"
+            "result_type:'group',matching_group_count:integer,all_results_visible:boolean}. "
+            "Coordinates must be the center of the group row relative to the image. "
+            "Only group rows count for matching_group_count and all_results_visible. "
+            "If group rows continue below the screenshot, more than one group matches, "
+            "or uniqueness is uncertain, return found:false and all_results_visible:false. "
+            "Require the exact visible target name; never substitute a similar name."
+        )
         data = self._ask(
             image_png,
+            group_instruction if is_group else
             f"Locate the WeChat CONTACT search result for {json.dumps(target, ensure_ascii=False)} "
             f"in this {width}x{height} screenshot. Match the visible contact row visually; "
             "do not use a chat-history match, search input, web result, or group. "
@@ -85,13 +104,13 @@ class VisionClient:
             "when unsure, return found:false.",
         )
         if (not data or data.get("found") is not True
-                or data.get("result_type") != "contact"
-                or type(data.get("matching_contact_count")) is not int
-                or data["matching_contact_count"] != 1
+                or data.get("result_type") != result_type
+                or type(data.get(count_field)) is not int
+                or data[count_field] != 1
                 or data.get("all_results_visible") is not True):
             logger.warning("视觉搜索拒绝 | found=%s | unique_contact=%s | contact_results_complete=%s",
                            data.get("found") if data else None,
-                           data.get("matching_contact_count") == 1 if data else False,
+                           data.get(count_field) == 1 if data else False,
                            data.get("all_results_visible") if data else None)
             return None
         x, y = data.get("x"), data.get("y")

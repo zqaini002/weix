@@ -71,3 +71,20 @@ def test_timeout_and_invalid_json_fail_closed(monkeypatch):
     response.json.return_value = {"choices": [{"message": {"content": "oops"}}]}
     monkeypatch.setattr(httpx, "post", Mock(return_value=response))
     assert client.read_visible_messages(b"PNG") is None
+
+
+def test_group_search_requires_unique_exact_visible_group(monkeypatch):
+    payload = {"found": True, "x": 80, "y": 100, "visible_name": "\u59731\u6d4b\u8bd5", "result_type": "group", "matching_group_count": 1, "all_results_visible": True}
+    client = VisionClient("fake")
+    post = client_reply(monkeypatch, payload)
+    hit = client.locate_search_result(b"PNG", "\u59731\u6d4b\u8bd5", (245, 760), is_group=True)
+    assert (hit.x, hit.y, hit.visible_name) == (80, 100, "\u59731\u6d4b\u8bd5")
+    instruction = post.call_args.kwargs["json"]["messages"][0]["content"][0]["text"]
+    assert "matching_group_count" in instruction
+    assert "\u7fa4\u804a" in instruction and "Recent" in instruction
+    for change in ({"matching_group_count": 2}, {"matching_group_count": True},
+                   {"all_results_visible": False}, {"result_type": "contact"},
+                   {"result_type": "history"}, {"visible_name": "\u59731\u6d4b\u8bd52"},
+                   {"x": True}, {"x": -1}, {"y": 760}):
+        client_reply(monkeypatch, dict(payload, **change))
+        assert client.locate_search_result(b"PNG", "\u59731\u6d4b\u8bd5", (245, 760), is_group=True) is None

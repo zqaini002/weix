@@ -30,6 +30,41 @@ def _get_config_path() -> str:
 
 
 # --- Chat Config ---
+def validate_order_intake_config(settings):
+    def invalid(message):
+        raise HTTPException(422, f"点单配置无效: {message}")
+
+    if not isinstance(settings, dict):
+        invalid("应为对象")
+    if "enabled" in settings and type(settings["enabled"]) is not bool:
+        invalid("启用状态应为布尔值")
+    if "max_targets" in settings and (
+        type(settings["max_targets"]) is not int or not 1 <= settings["max_targets"] <= 10
+    ):
+        invalid("一次转发目标数应为 1 到 10")
+    if "template" in settings and (
+        not isinstance(settings["template"], str) or len(settings["template"]) > 5000
+    ):
+        invalid("模板应为不超过 5000 字的文本")
+    if "trigger_keywords" in settings:
+        keywords = settings["trigger_keywords"]
+        if not isinstance(keywords, list) or not keywords or any(
+            not isinstance(word, str) or not word.strip() for word in keywords
+        ):
+            invalid("触发词应为非空文本列表")
+    if "group_aliases" in settings:
+        aliases = settings["group_aliases"]
+        if not isinstance(aliases, dict):
+            invalid("群别名应为对象")
+        normalized = set()
+        for alias, room in aliases.items():
+            if not isinstance(alias, str) or not alias.strip() or alias.strip() in normalized:
+                invalid("群别名不能为空或重复")
+            if not isinstance(room, str) or not room.endswith("@chatroom") or room != room.strip():
+                invalid("群别名必须指向群聊 ID")
+            normalized.add(alias.strip())
+
+
 @router.get("/config/chat")
 async def get_chat_config():
     return get_config().auto_reply
@@ -38,6 +73,8 @@ async def get_chat_config():
 @router.put("/config/chat")
 async def update_chat_config(data: dict):
     cfg = get_config()
+    if "order_intake" in data:
+        validate_order_intake_config(data["order_intake"])
 
     config_path = _get_config_path()
     try:

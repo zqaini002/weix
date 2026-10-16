@@ -5,7 +5,6 @@
 """
 
 import asyncio
-import json
 import io
 import logging
 import os
@@ -19,7 +18,6 @@ import pyperclip
 
 from app.core.base import BaseMessageSender
 from app.config import get_config
-from app.utils.paths import get_data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -172,24 +170,24 @@ class WindowsSender(BaseMessageSender):
         """检查微信进程是否在运行。"""
         return self._find_wechat_window() is not None
 
-    async def open_chat(self, receiver: str) -> bool:
+    async def open_chat(self, receiver: str, is_group: bool = False) -> bool:
         """打开指定聊天（用于发送后停靠）。"""
         if not receiver:
             return False
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, self._open_chat_sync, receiver)
+        return await loop.run_in_executor(_executor, self._open_chat_sync, receiver, is_group)
 
-    async def inspect_chat(self, receiver: str, candidates: list[str]) -> bytes | None:
-        """Open a verified private chat and capture its visible message area."""
+    async def inspect_chat(self, receiver: str, candidates: list[str], is_group: bool = False) -> bytes | None:
+        """Open a visually verified chat and capture its visible message area."""
         if not receiver or receiver not in candidates or self._vision_client is None:
             return None
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_executor, self._inspect_chat_sync, receiver, candidates)
+        return await loop.run_in_executor(_executor, self._inspect_chat_sync, receiver, candidates, is_group)
 
-    def _inspect_chat_sync(self, receiver: str, candidates: list[str]) -> bytes | None:
+    def _inspect_chat_sync(self, receiver: str, candidates: list[str], is_group: bool = False) -> bytes | None:
         with self._gui_lock:
             try:
-                return self._visual_open_chat(receiver, candidates)
+                return self._visual_open_chat(receiver, candidates, is_group=is_group)
             except Exception as exc:
                 logger.warning("视觉会话检查失败 | receiver=%s | reason=%s", receiver, exc)
                 return None
@@ -216,8 +214,8 @@ class WindowsSender(BaseMessageSender):
         image.save(output, format="PNG")
         return output.getvalue()
 
-    def _visual_open_chat(self, receiver: str, candidates: list[str]) -> bytes | None:
-        """Search and ground a contact row using one window snapshot, then verify title."""
+    def _visual_open_chat(self, receiver: str, candidates: list[str], is_group: bool = False) -> bytes | None:
+        """Search and ground a unique row using one window snapshot, then verify title."""
         if self._vision_client is None:
             return None
         self._activate_wechat()
@@ -233,7 +231,8 @@ class WindowsSender(BaseMessageSender):
         self._require_foreground(win)
         search_region = (win.left + 65, win.top + 30, 245, win.height - 40)
         image = self._capture_region(search_region)
-        hit = self._vision_client.locate_search_result(image, receiver, search_region[2:])
+        hit = (self._vision_client.locate_search_result(image, receiver, search_region[2:], is_group=True)
+               if is_group else self._vision_client.locate_search_result(image, receiver, search_region[2:]))
         fresh = self._find_wechat_window()
         if hit is None or fresh is None or self._rect(fresh) != rect:
             logger.warning("搜索结果未通过视觉唯一性校验或窗口位置已变化 | receiver=%s", receiver)
@@ -305,8 +304,8 @@ class WindowsSender(BaseMessageSender):
         """同步消息发送，在全局锁内执行。"""
         with self._gui_lock:
             try:
-                if self._vision_client is None or is_group:
-                    logger.error("视觉发送不可用或目标不是私聊 | receiver=%s", receiver)
+                if self._vision_client is None or (is_group and not target_id.endswith("@chatroom")):
+                    logger.error("Visual sending requires a client and valid group conversation ID | receiver=%s", receiver)
                     return False
                 # 检查微信是否在运行
                 if self._find_wechat_window() is None:
@@ -314,7 +313,7 @@ class WindowsSender(BaseMessageSender):
                     return False
 
                 candidates = [receiver]
-                if self._visual_open_chat(receiver, candidates) is None:
+                if self._visual_open_chat(receiver, candidates, is_group=is_group) is None:
                     logger.error("视觉定位或标题确认失败 | receiver=%s", receiver)
                     return False
 
@@ -322,6 +321,12 @@ class WindowsSender(BaseMessageSender):
                 self._activate_wechat()
                 if not self._verify_visual_title(receiver, candidates):
                     return False
+                after_local_id = None
+                if target_id:
+                    after_local_id = self._snapshot_target_local_id(target_id)
+                    if after_local_id is None:
+                        logger.warning("Target database baseline unavailable; stopped before compose | target_id=%s", target_id)
+                        return False
                 input_x, input_y = self._focus_message_input()
                 self._paste_text(msg, input_x, input_y)
                 since_ts = int(time.time())
@@ -329,7 +334,7 @@ class WindowsSender(BaseMessageSender):
 
                 # Automatic replies carry the database conversation ID. Verify
                 # the exact outgoing text there; vision only locates the chat.
-                confirmed = (self._verify_sent_text(msg, since_ts, target_id, required=True)
+                confirmed = (self._verify_sent_text(msg, since_ts, target_id, required=True, after_local_id=after_local_id)
                              if target_id else self._confirm_visual_send(msg, receiver))
                 if not confirmed:
                     logger.warning("发送后未确认目标会话的消息记录 | receiver=%s", receiver)
@@ -363,11 +368,15 @@ class WindowsSender(BaseMessageSender):
         bubbles = self._vision_client.read_visible_messages(image)
         return bool(bubbles and bubbles[-1].side == "self" and bubbles[-1].content == msg)
 
-    def _open_chat_sync(self, receiver: str) -> bool:
+    def _open_chat_sync(self, receiver: str, is_group: bool = False) -> bool:
         """同步打开聊天。"""
         with self._gui_lock:
             try:
-                self._full_search(receiver, is_group=False)
+                if is_group:
+                    if self._visual_open_chat(receiver, [receiver], is_group=True) is None:
+                        return False
+                else:
+                    self._full_search(receiver, is_group=False)
                 self.reset_search_state()
                 return True
             except Exception as exc:
@@ -668,7 +677,7 @@ class WindowsSender(BaseMessageSender):
 
     # --- 发送后校验 ---
 
-    def _verify_sent_text(self, msg: str, since_ts: int, target_id: str = "", *, required: bool = False) -> bool:
+    def _verify_sent_text(self, msg: str, since_ts: int, target_id: str = "", *, required: bool = False, after_local_id: int | None = None) -> bool:
         """发送后从本地消息库回读确认，避免 GUI 假阳性。"""
         if not self._verify_after_send and not required:
             return True
@@ -676,7 +685,8 @@ class WindowsSender(BaseMessageSender):
         deadline = time.monotonic() + self._verify_timeout
         while time.monotonic() <= deadline:
             try:
-                if self._find_recent_self_text(msg, since_ts, target_id):
+                if (self._find_recent_self_text(msg, since_ts, target_id, after_local_id=after_local_id)
+                        if after_local_id is not None else self._find_recent_self_text(msg, since_ts, target_id)):
                     return True
             except Exception as exc:
                 logger.debug("发送回读校验异常: %s", exc)
@@ -684,7 +694,7 @@ class WindowsSender(BaseMessageSender):
         return False
 
     @staticmethod
-    def _find_recent_self_text(msg: str, since_ts: int, target_id: str = "") -> bool:
+    def _find_recent_self_text(msg: str, since_ts: int, target_id: str = "", *, after_local_id: int | None = None) -> bool:
         from app.core.db_reader_windows import WindowsDBReader
 
         db_path, hex_key = WindowsSender._find_message_db_key()
@@ -701,7 +711,35 @@ class WindowsSender(BaseMessageSender):
                 msg,
                 since_ts,
                 target_id,
+                after_local_id=after_local_id,
             )
+        finally:
+            reader.close()
+
+    @staticmethod
+    def _snapshot_target_local_id(target_id: str) -> int | None:
+        """Capture this exact v4 conversation before composing a new message."""
+        from app.core.db_reader_windows import WindowsDBReader
+
+        if not target_id:
+            return None
+        reader = WindowsDBReader()
+        try:
+            db_path, hex_key = WindowsSender._find_message_db_key()
+            if not db_path or not hex_key or not reader.open_db(db_path, bytes.fromhex(hex_key)):
+                return None
+            if not reader._has_msg_shard_tables():
+                return None
+            tables = [table for table, username in reader._get_v4_msg_tables() if username == target_id]
+            if len(tables) != 1:
+                return None
+            table = tables[0].replace('"', '""')
+            row = reader._sqlite_conn.execute(f'SELECT COALESCE(MAX(local_id), 0) FROM "{table}"').fetchone()
+            value = row[0] if row else None
+            return value if type(value) is int and value >= 0 else None
+        except Exception as exc:
+            logger.debug("Target database baseline failed: %s", exc)
+            return None
         finally:
             reader.close()
 
@@ -709,11 +747,14 @@ class WindowsSender(BaseMessageSender):
     def _find_message_db_key() -> tuple[str, str]:
         from app.core.db_reader_windows import WindowsDBReader
 
-        keys_path = get_data_dir() / "all_keys.json"
-        if not keys_path.exists():
-            return "", ""
+        from app.core.platform import Platform
+
         try:
-            keys = json.loads(keys_path.read_text(encoding="utf-8"))
+            extractor = Platform.get().key_extractor
+            keys = extractor.load_keys()
+            # Full account paths plus a unique complete account prevent a
+            # different account's same-named database from confirming delivery.
+            keys = extractor.select_account_keys(keys)
         except Exception:
             return "", ""
 
@@ -727,12 +768,9 @@ class WindowsSender(BaseMessageSender):
 
     @staticmethod
     def _key_matches_db_path(key_path: str, full_path: str) -> bool:
-        normalized_key = key_path.replace("\\", "/").lower()
-        normalized_full = full_path.replace("\\", "/").lower()
-        basename = os.path.basename(full_path)
-        if "/" in normalized_key:
-            return normalized_full.endswith(normalized_key)
-        return os.path.normcase(key_path) == os.path.normcase(basename)
+        if not os.path.isabs(key_path) or not os.path.isabs(full_path):
+            return False
+        return os.path.normcase(os.path.normpath(key_path)) == os.path.normcase(os.path.normpath(full_path))
 
     @staticmethod
     def _reader_has_recent_self_text(
@@ -740,11 +778,16 @@ class WindowsSender(BaseMessageSender):
         msg: str,
         since_ts: int,
         target_id: str = "",
+        *,
+        after_local_id: int | None = None,
     ) -> bool:
         normalized_msg = WindowsSender._normalize_text(msg)
         if not normalized_msg or reader._sqlite_conn is None:
             return False
 
+        if after_local_id is not None and (
+                not target_id or type(after_local_id) is not int or after_local_id < 0):
+            return False
         if reader._has_msg_shard_tables():
             tables = [
                 (table, username)
@@ -756,13 +799,15 @@ class WindowsSender(BaseMessageSender):
                 return False
             for table, _username in tables:
                 try:
+                    predicate = "local_id > ?" if after_local_id is not None else "create_time >= ?"
+                    cutoff = after_local_id if after_local_id is not None else since_ts
                     cursor = reader._sqlite_conn.execute(
                         f'SELECT message_content, real_sender_id, status, '
                         f'origin_source, server_seq '
                         f'FROM "{table}" '
-                        f'WHERE create_time >= ? AND local_type = 1 '
+                        f'WHERE {predicate} AND local_type = 1 '
                         f'ORDER BY local_id DESC LIMIT 20',
-                        (since_ts,),
+                        (cutoff,),
                     )
                 except Exception:
                     continue
@@ -774,6 +819,8 @@ class WindowsSender(BaseMessageSender):
                         return True
             return False
 
+        if after_local_id is not None:
+            return False
         try:
             params: list[object] = [since_ts * 1000]
             talker_filter = ""

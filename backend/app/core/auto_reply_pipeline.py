@@ -59,6 +59,8 @@ class AutoReplyPipeline:
         self.selected_source: str | None = None
         self.disabled_reason: str = ""
         self._selected_keys: dict[str, str] = {}
+        self._order_intake = None
+        self._account_scope = ""
         # 消息防抖缓冲: sender_key -> [messages]
         self._buffer: dict[str, list] = {}
         self._buffer_timers: dict[str, asyncio.Task] = {}
@@ -105,10 +107,17 @@ class AutoReplyPipeline:
             if str(name).strip()
         ))
         private_mode = reply_config.get("private_chat_mode", "whitelist")
-        if not names:
-            self.disabled_reason = "auto_reply.private_whitelist 为空，请在 Web 聊天配置中添加聊天标题"
+        group_mode = reply_config.get("group_chat_mode", "whitelist")
+        groups = reply_config.get("group_whitelist", [])
+        private_enabled = private_mode == "all" or (private_mode == "whitelist" and bool(names))
+        group_enabled = group_mode == "all" or (group_mode == "whitelist" and bool(groups))
+        if not private_enabled and not group_enabled:
+            self.disabled_reason = "无有效接收范围：请开启全部私聊，或配置允许接收的私聊/群聊白名单"
             logger.warning(self.disabled_reason)
             return False
+        names = (names if private_mode == "whitelist" else []) + (
+            list(groups) if group_mode == "whitelist" or reply_config.get("order_intake", {}).get("enabled") else []
+        )
         requested = config.monitor.get("source", "auto")
         api_key = str(config.ai.get("api_key", "") or "").strip()
         if not api_key:
@@ -130,6 +139,7 @@ class AutoReplyPipeline:
             self.disabled_reason = "本机消息数据库无法验证或打开"
             logger.warning(self.disabled_reason)
             return False
+        self._account_scope = str(getattr(msg_reader, "_db_path", ""))
         self._name_map = self._build_name_map(platform, self._selected_keys)
         private_titles = Counter(
             title for wxid, title in self._name_map.items()
@@ -146,7 +156,9 @@ class AutoReplyPipeline:
             return False
         self.selected_source = source
         self._monitor = MessageMonitor(msg_reader, name_map=self._name_map)
-        await self._monitor.start(lookback_seconds=lookback_seconds)
+        await self._monitor.start(lookback_seconds=(
+            0.0 if reply_config.get("order_intake", {}).get("enabled") else lookback_seconds
+        ))
 
         # 5. 加载规则引擎 (先从 YAML 同步到 DB)
         from app.workflow.rule_engine import RuleEngine
@@ -564,6 +576,19 @@ class AutoReplyPipeline:
             )
             return
 
+        if not msg.is_group and config.get("order_intake", {}).get("enabled", False):
+            if self._order_intake is None:
+                from app.workflow.order_intake import OrderIntake
+                self._order_intake = OrderIntake(
+                    self._session_factory, self._send_order_text,
+                    lambda: get_config().auto_reply, lambda: self._name_map,
+                    account_scope=self._account_scope,
+                )
+            await self._order_intake.handle(msg)
+            # Order mode consumes all permitted private text. An unsafe or
+            # unknown display title must never fall through to AI/workflows.
+            return
+
         # 防抖：取消旧定时器，入队，启动新 20s 定时器
         if buffer_key in self._buffer_timers:
             self._buffer_timers[buffer_key].cancel()
@@ -578,6 +603,31 @@ class AutoReplyPipeline:
         logger.debug(
             f"消息入缓冲 | key={buffer_key} | 缓冲数={len(self._buffer[buffer_key])}"
         )
+
+    async def _send_order_text(self, text: str, title: str, *, is_group: bool, target_id: str) -> bool:
+        """Recheck current permissions for every private/group order action."""
+        config = get_config().auto_reply
+        if (not config.get("enabled", True)
+                or not config.get("order_intake", {}).get("enabled", False)
+                or self._name_map.get(target_id) != title
+                or self._is_unsearchable_name(title)):
+            return False
+        if is_group:
+            allowed = config.get("group_whitelist", [])
+            if (not target_id.endswith("@chatroom")
+                    or (target_id not in allowed and title not in allowed)
+                    or sum(1 for k, v in self._name_map.items() if k.endswith("@chatroom") and v == title) != 1):
+                return False
+        else:
+            mode = config.get("private_chat_mode", "whitelist")
+            allowed = config.get("private_whitelist", [])
+            if (mode == "none" or title in self._ambiguous_private_titles
+                    or (mode == "whitelist" and target_id not in allowed and title not in allowed)):
+                return False
+        sent = await self._sender.send_text(text, title, is_group=is_group, target_id=target_id)
+        if sent and self._monitor:
+            self._monitor.remember_sent_message(target_id, text)
+        return bool(sent)
 
     async def _flush_buffer(self, buffer_key: str) -> None:
         """防抖到期：合并缓冲消息，执行规则匹配 + AI 回复。"""

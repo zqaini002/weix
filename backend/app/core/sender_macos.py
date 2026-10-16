@@ -370,6 +370,10 @@ class GroupChatSender(_BaseMacOSSender):
     def _build_script(self, msg: str, receiver: str, skip_search: bool = False) -> str:
         return super()._build_script(msg, receiver, skip_search=False)
 
+    def _build_verified_script(self, msg: str, receiver: str) -> str:
+        """Compose only after the facade has visually verified the group."""
+        return super()._build_script(msg, receiver, skip_search=True)
+
     def _build_search_lines(self, receiver: str) -> list[str]:
         return [
             "        key code 36",
@@ -396,18 +400,20 @@ class MacOSSender(BaseMessageSender):
         is_group: bool = False,
         target_id: str = "",
     ) -> bool:
-        if not msg or not receiver or is_group or self._vision_client is None:
+        if (not msg or not receiver or self._vision_client is None
+                or (is_group and not target_id.endswith("@chatroom"))):
             return False
         async with self._private_sender._get_global_send_lock():
             candidates = [receiver]
-            if await self._visual_open_chat(receiver, candidates) is None:
+            if await self._visual_open_chat(receiver, candidates, is_group=is_group) is None:
                 return False
             if not await asyncio.to_thread(self._visual_title_matches, receiver, candidates):
                 return False
-            script = self._private_sender._build_script(
-                self._escape(msg), self._escape(receiver), skip_search=True
-            )
-            if not await self._private_sender._run(script, "vision_send"):
+            sender = self._group_sender if is_group else self._private_sender
+            script = (sender._build_verified_script(self._escape(msg), self._escape(receiver))
+                      if is_group else sender._build_script(
+                          self._escape(msg), self._escape(receiver), skip_search=True))
+            if not await sender._run(script, "vision_send"):
                 return False
             return await self._confirm_visual_send(msg, receiver, candidates)
 
@@ -441,7 +447,7 @@ class MacOSSender(BaseMessageSender):
         return bool(fresh and self._bounds_tuple(bounds) == self._bounds_tuple(fresh[1])
                     and self._vision_client.classify_chat_title(image, candidates) == receiver)
 
-    async def _visual_open_chat(self, receiver: str, candidates: list[str]) -> bytes | None:
+    async def _visual_open_chat(self, receiver: str, candidates: list[str], is_group: bool = False) -> bytes | None:
         from app.core.screenshot_helper import capture_window_region_png
         try:
             search = self._build_visual_search_script(receiver)
@@ -456,7 +462,8 @@ class MacOSSender(BaseMessageSender):
                 return None
             image, bounds, image_size = captured
             hit = await asyncio.to_thread(
-                self._vision_client.locate_search_result, image, receiver, image_size
+                self._vision_client.locate_search_result, image, receiver, image_size,
+                **({"is_group": True} if is_group else {})
             )
             fresh = capture_window_region_png((65, 30, 245, search_height))
             if hit is None or not fresh or self._bounds_tuple(bounds) != self._bounds_tuple(fresh[1]):
@@ -498,11 +505,11 @@ class MacOSSender(BaseMessageSender):
         ]
         return "\n".join(lines)
 
-    async def inspect_chat(self, receiver: str, candidates: list[str]) -> bytes | None:
+    async def inspect_chat(self, receiver: str, candidates: list[str], is_group: bool = False) -> bytes | None:
         if not receiver or receiver not in candidates or self._vision_client is None:
             return None
         async with self._private_sender._get_global_send_lock():
-            return await self._visual_open_chat(receiver, candidates)
+            return await self._visual_open_chat(receiver, candidates, is_group=is_group)
 
     async def send_image(self, path: str, receiver: str) -> bool:
         return await self._private_sender.send_image(path, receiver)
@@ -512,9 +519,10 @@ class MacOSSender(BaseMessageSender):
 
     async def open_chat(self, receiver: str, is_group: bool = False) -> bool:
         if self._vision_client is not None:
-            return bool(not is_group and await self.inspect_chat(receiver, [receiver]))
-        sender = self._group_sender if is_group else self._private_sender
-        return await sender.open_chat(receiver)
+            return bool(await self.inspect_chat(receiver, [receiver], is_group=is_group))
+        if is_group:
+            return False
+        return await self._private_sender.open_chat(receiver)
 
     def reset_search_state(self) -> None:
         self._private_sender.reset_search_state()

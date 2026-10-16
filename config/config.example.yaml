@@ -39,6 +39,24 @@ auto_reply:
   private_whitelist: []  # 在 Web 聊天配置中设置允许自动回复的会话
   reply_mode: all
   rules: []
+  order_intake:
+    enabled: false
+    trigger_keywords:
+    - 在吗
+    - 在吗？
+    - 在吗?
+    - 点单
+    - 下单
+    template: |-
+      如需点单 请自助填写
+      发送群聊：
+      发送内容：
+      发送群聊：
+      发送内容：
+      （特殊要求备注在发送内容里）
+      我是主人的小助手 其他信息辛苦等待主人在线后回复哟。
+    max_targets: 5
+    group_aliases: {}
 
 database:
   url: sqlite+aiosqlite:///data/weix.db
