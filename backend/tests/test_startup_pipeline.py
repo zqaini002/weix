@@ -72,6 +72,38 @@ def reset_startup_globals():
     main._pipeline = None
 
 
+def test_old_account_cache_is_rescanned_even_when_files_still_decrypt(monkeypatch, tmp_path):
+    events = []
+    (tmp_path / "all_keys.json").write_text("{}", encoding="utf-8")
+
+    class Extractor:
+        requires_session_scan = True
+
+        def load_keys(self):
+            return {"message/message_0.db": "ab" * 32, "contact/contact.db": "cd" * 32}
+
+        def validate_cached_keys(self, keys):
+            return keys
+
+        def select_account_keys(self, keys):
+            return keys
+
+        def clear_keys(self):
+            events.append("clear")
+
+        def find_wechat_processes(self):
+            return [123]
+
+        def scan_memory_for_keys(self, pid, stop_event=None):
+            events.append("scan-current-session")
+            return {}
+
+    monkeypatch.setattr(main, "get_data_dir", lambda: tmp_path)
+    monkeypatch.setattr("app.core.platform.Platform.get", lambda: SimpleNamespace(key_extractor=Extractor()))
+    main._try_auto_extract_keys()
+    assert "scan-current-session" in events
+
+
 @pytest.mark.asyncio
 async def test_late_key_extraction_schedules_pipeline_start(monkeypatch, tmp_path):
     started = []

@@ -43,6 +43,8 @@ def _try_auto_extract_keys():
                 valid_keys = keys if reader is not None else {}
                 if reader is not None and hasattr(reader, "close"):
                     reader.close()
+            if hasattr(extractor, "select_account_keys"):
+                valid_keys = extractor.select_account_keys(valid_keys)
             has_message_key = (
                 extractor._has_message_key(valid_keys)
                 if hasattr(extractor, "_has_message_key")
@@ -53,11 +55,14 @@ def _try_auto_extract_keys():
                 for key in valid_keys
             )
             if valid_keys and has_message_key and has_contact_key:
-                logger.info("密钥已缓存且验证通过，跳过提取")
-                _schedule_pipeline_start_after_keys_ready()
-                return
-            logger.warning("本机消息库或联系人库密钥不完整，重新提取")
-            if cache.exists() and not valid_keys:
+                if not getattr(extractor, "requires_session_scan", False):
+                    logger.info("密钥已缓存且验证通过，跳过提取")
+                    _schedule_pipeline_start_after_keys_ready()
+                    return
+                logger.info("磁盘密钥有效，仍需重新扫描以确认当前微信登录账号")
+            else:
+                logger.warning("本机消息库或联系人库密钥不完整，重新提取")
+            if cache.exists() and (not valid_keys or getattr(extractor, "requires_session_scan", False)):
                 if hasattr(extractor, "clear_keys"):
                     extractor.clear_keys()
                 else:

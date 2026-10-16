@@ -243,6 +243,8 @@ class AutoReplyPipeline:
             if cache.exists():
                 with open(cache) as f:
                     keys = json.load(f)
+        if hasattr(extractor, "select_account_keys"):
+            keys = extractor.select_account_keys(extractor.validate_cached_keys(keys))
         return keys
 
     @staticmethod

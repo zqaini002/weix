@@ -131,3 +131,22 @@ def test_failed_contact_key_never_reads_closed_database_or_reports_ready(monkeyp
     assert "密钥" in result["error"]
     assert result["total_contacts"] == result["total_chatrooms"] == 0
     assert reads == []
+
+
+def test_disk_cache_fallback_cannot_bypass_account_validation(tmp_path, monkeypatch):
+    import json
+
+    class Extractor(EmptyExtractor):
+        def validate_cached_keys(self, keys):
+            return keys
+
+        def select_account_keys(self, keys):
+            return {}  # Keys belong to different accounts.
+
+    (tmp_path / "all_keys.json").write_text(
+        json.dumps({"contact/contact.db": "ab" * 32}), encoding="utf-8",
+    )
+    platform = SimpleNamespace(key_extractor=Extractor(), is_macos=False, is_windows=True)
+    monkeypatch.setattr(platform_api.Platform, "get", lambda: platform)
+    monkeypatch.setattr(platform_api, "get_data_dir", lambda: tmp_path)
+    assert asyncio.run(platform_api.list_contacts(type="all", search=""))["ready"] is False

@@ -64,6 +64,9 @@ async def list_contacts(
                 with open(cache) as f:
                     keys = json.load(f)
 
+        if hasattr(extractor, "select_account_keys"):
+            keys = extractor.select_account_keys(extractor.validate_cached_keys(keys))
+
         if not keys:
             if platform.is_windows:
                 error = "Windows 微信数据库密钥暂不可用；请确认微信已登录，等待本机重新提取，或在本机 .env 设置 WEIX_WECHAT_DB_KEY"
@@ -131,6 +134,9 @@ async def list_contacts(
                         hint = "微信登录成功不代表数据库密钥有效，请查看启动日志中的密钥验证与重新提取结果"
                 except Exception as e:
                     error = f"联系人数据库解密失败: {e}"
+                finally:
+                    if hasattr(reader, "close"):
+                        reader.close()
             elif not contact_db_path:
                 error = "联系人数据库或对应密钥不可用 (contact.db)"
     except Exception as e:

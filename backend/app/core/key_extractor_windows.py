@@ -157,6 +157,10 @@ class WindowsKeyExtractor(BaseKeyExtractor):
     4. 持久化密钥到 JSON 文件
     """
 
+    # Old account files still decrypt after logout; disk validation alone
+    # cannot establish which account is logged into the current process.
+    requires_session_scan = True
+
     # 密钥正则模式: 64 hex (key) + 32 hex (salt) = 96 hex chars
     KEY_PATTERN = re.compile(rb"([0-9A-Fa-f]{64})([0-9A-Fa-f]{32})")
     WCDB_KEY_PATTERN = re.compile(rb"x'([0-9A-Fa-f]{64,192})'")
@@ -395,10 +399,7 @@ class WindowsKeyExtractor(BaseKeyExtractor):
                 logger.info("密钥扫描已取消")
                 return {}
             found_keys.update(config_keys)
-            if self._has_message_key(found_keys) and any(
-                path.replace("\\", "/").lower().endswith("contact.db")
-                for path in found_keys
-            ):
+            if self.select_account_keys(found_keys):
                 self._keys = found_keys
                 self._save_keys()
                 logger.info("Config.Cipher 已验证消息库与联系人库密钥，共 %d 个", len(found_keys))
@@ -1113,21 +1114,41 @@ class WindowsKeyExtractor(BaseKeyExtractor):
         db_path: str,
         data_roots: Optional[list[str]] = None,
     ) -> str:
-        """Return a stable key cache path relative to the account db root."""
-        norm_db = os.path.normpath(db_path)
-        for data_root in data_roots or self._find_wechat_data_dirs():
-            try:
-                rel = os.path.relpath(norm_db, data_root)
-            except ValueError:
-                continue
-            if rel.startswith(".."):
-                continue
-            parts = rel.split(os.sep)
-            if "db_storage" in parts:
-                idx = parts.index("db_storage")
-                return "/".join(parts[idx + 1:])
-            return "/".join(parts)
-        return os.path.basename(norm_db)
+        """Bind a key to this machine's exact account/database path.
+
+        Dropping the account before db_storage makes different accounts'
+        contact.db and message_0.db overwrite one another in the cache.
+        """
+        return os.path.abspath(db_path).replace("\\", "/")
+
+    @classmethod
+    def select_account_keys(cls, keys: dict[str, str]) -> dict[str, str]:
+        """Require message and contact keys belonging to one account."""
+        accounts: dict[str, dict[str, str]] = {}
+        for path, key in keys.items():
+            normalized = path.replace("\\", "/").lower()
+            if "/db_storage/" in normalized:
+                account = normalized.split("/db_storage/", 1)[0]
+            elif "/msg/" in normalized:
+                account = normalized.split("/msg/", 1)[0]
+            else:
+                continue  # Unbound caches must be validated/rebound first.
+            accounts.setdefault(account, {})[path] = key
+        complete = [
+            group for group in accounts.values()
+            if cls._has_message_key(group) and (any(
+                path.replace("\\", "/").lower().endswith("/contact/contact.db")
+                for path in group
+            ) or any(path.replace("\\", "/").lower().endswith("/msg/msg.db") for path in group))
+        ]
+        if len(complete) == 1:
+            return complete[0]
+        if keys:
+            logger.warning(
+                "数据库密钥未对应唯一完整账号（完整账号数=%d），停止跨账号读取并等待重新提取",
+                len(complete),
+            )
+        return {}
 
     @staticmethod
     def _has_message_key(keys: dict[str, str]) -> bool:
