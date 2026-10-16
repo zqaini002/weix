@@ -121,11 +121,14 @@ async def list_contacts(
 
             if contact_key and contact_db_path:
                 try:
-                    reader.open_db(contact_db_path, bytes.fromhex(contact_key))
-                    if type in ("all", "contacts"):
-                        contacts = reader.get_contacts()
-                    if type in ("all", "chatrooms"):
-                        chatrooms = reader.get_chatrooms()
+                    if reader.open_db(contact_db_path, bytes.fromhex(contact_key)):
+                        if type in ("all", "contacts"):
+                            contacts = reader.get_contacts()
+                        if type in ("all", "chatrooms"):
+                            chatrooms = reader.get_chatrooms()
+                    else:
+                        error = "联系人数据库密钥校验失败，数据库未打开；请核对登录账号、本机密钥缓存及微信版本"
+                        hint = "微信登录成功不代表数据库密钥有效，请查看启动日志中的密钥验证与重新提取结果"
                 except Exception as e:
                     error = f"联系人数据库解密失败: {e}"
             elif not contact_db_path:

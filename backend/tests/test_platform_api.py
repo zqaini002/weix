@@ -100,3 +100,34 @@ def test_contacts_api_uses_isolated_reader(monkeypatch):
     assert ContactReader.opened == [
         ("/wx/db_storage/contact/contact.db", bytes.fromhex("00" * 32))
     ]
+
+
+def test_failed_contact_key_never_reads_closed_database_or_reports_ready(monkeypatch):
+    from app.core import db_reader_windows
+
+    reads = []
+
+    class FailedReader(ContactReader):
+        def open_db(self, path, key):
+            return False
+
+        def get_contacts(self):
+            reads.append("contacts")
+            return []
+
+        def get_chatrooms(self):
+            reads.append("chatrooms")
+            return []
+
+    platform = SimpleNamespace(
+        key_extractor=FakeExtractor(), is_macos=False, is_windows=True,
+    )
+    monkeypatch.setattr(platform_api.Platform, "get", lambda: platform)
+    monkeypatch.setattr(db_reader_windows, "WindowsDBReader", FailedReader)
+
+    result = asyncio.run(platform_api.list_contacts(type="all", search=""))
+
+    assert result["ready"] is False
+    assert "密钥" in result["error"]
+    assert result["total_contacts"] == result["total_chatrooms"] == 0
+    assert reads == []
