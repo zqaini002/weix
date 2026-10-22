@@ -49,6 +49,7 @@ jobs:
             --clean \
             --noconfirm \
             --paths=backend \
+            --runtime-hook backend/package_smoke.py \
             --add-data "config:config" \
             --add-data "data:data" \
             --add-data "frontend/dist:frontend_dist" \
@@ -64,10 +65,16 @@ jobs:
             --hidden-import=langchain \
             --hidden-import=jieba \
             --hidden-import=passlib.handlers.bcrypt \
-            --hidden-import=pycryptodome \
+            --hidden-import=Crypto.Cipher.AES \
             --collect-all chromadb \
             --collect-all sentence_transformers \
             backend/app/main.py
+
+      - name: Smoke test clean macOS package
+        run: |
+          cd "$RUNNER_TEMP"
+          WEIX_PACKAGE_SMOKE=1 WEIX_SMOKE_RESULT="$RUNNER_TEMP/weix-smoke.txt" DEEPSEEK_API_KEY='' "$GITHUB_WORKSPACE/dist/Weix/Weix"
+          test "$(cat "$RUNNER_TEMP/weix-smoke.txt")" = ok
 
       - name: Package (DMG)
         run: |
@@ -76,11 +83,22 @@ jobs:
           cat > dist/Weix.app/Contents/MacOS/start_weix.sh << 'EOF'
           #!/bin/bash
           DIR="$(cd "$(dirname "$0")" && pwd)"
+          cd "$DIR"
           "$DIR/Weix" &
           echo "Weix: http://localhost:8000"
           wait
           EOF
           chmod +x dist/Weix.app/Contents/MacOS/start_weix.sh
+          cat > dist/Weix.app/Contents/Info.plist << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+          <key>CFBundleExecutable</key><string>start_weix.sh</string>
+          <key>CFBundleIdentifier</key><string>io.github.zqaini002.weix</string>
+          <key>CFBundleName</key><string>Weix</string>
+          <key>CFBundlePackageType</key><string>APPL</string>
+          </dict></plist>
+          EOF
           hdiutil create -volname Weix -srcfolder dist/Weix.app -ov -format UDZO dist/Weix-macOS.dmg
 
       - name: Upload Artifact
@@ -119,7 +137,17 @@ jobs:
           copy config\config.example.yaml config\config.yaml
           New-Item -ItemType Directory -Force -Path data | Out-Null
           New-Item -ItemType File -Force -Path data/.gitkeep | Out-Null
-          pyinstaller --name=Weix --onedir --console --clean --noconfirm --paths=backend --add-data "config;config" --add-data "data;data" --add-data "frontend/dist;frontend_dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=sqlalchemy.ext.asyncio --hidden-import=aiosqlite --hidden-import=chromadb --hidden-import=sentence_transformers --hidden-import=tiktoken --hidden-import=langchain --hidden-import=jieba --hidden-import=passlib.handlers.bcrypt --hidden-import=pycryptodome --collect-all chromadb --collect-all sentence_transformers backend/app/main.py
+          pyinstaller --name=Weix --onedir --windowed --clean --noconfirm --paths=backend --runtime-hook backend/package_smoke.py --add-data "config;config" --add-data "data;data" --add-data "frontend/dist;frontend_dist" --hidden-import=uvicorn.logging --hidden-import=uvicorn.loops.auto --hidden-import=uvicorn.protocols.http.auto --hidden-import=sqlalchemy.ext.asyncio --hidden-import=aiosqlite --hidden-import=chromadb --hidden-import=sentence_transformers --hidden-import=tiktoken --hidden-import=langchain --hidden-import=jieba --hidden-import=passlib.handlers.bcrypt --hidden-import=Crypto.Cipher.AES --collect-all chromadb --collect-all sentence_transformers backend/launcher.py
+
+      - name: Smoke test clean Windows package
+        run: |
+          $env:WEIX_PACKAGE_SMOKE = '1'
+          $env:WEIX_SMOKE_RESULT = "$env:RUNNER_TEMP/weix-smoke.txt"
+          $env:DEEPSEEK_API_KEY = ''
+          $process = Start-Process -FilePath "$pwd/dist/Weix/Weix.exe" -WorkingDirectory $env:RUNNER_TEMP -PassThru
+          if (-not $process.WaitForExit(120000)) { $process.Kill(); throw 'Package startup timed out' }
+          if ($process.ExitCode -ne 0 -or -not (Test-Path $env:WEIX_SMOKE_RESULT)) { throw 'Package startup failed' }
+          if ((Get-Content $env:WEIX_SMOKE_RESULT -Raw) -ne 'ok') { throw 'Package smoke check failed' }
 
       - name: Package (ZIP)
         run: |

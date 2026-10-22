@@ -38,6 +38,7 @@ matplotlib>=3.10.0
 # Auth
 python-jose[cryptography]>=3.3.0
 passlib[bcrypt]>=1.7.0
+bcrypt>=4.0.1,<5  # passlib 1.7 backend self-test relies on pre-5 long-password behavior
 
 # Utils
 pyyaml>=6.0.0

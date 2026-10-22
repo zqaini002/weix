@@ -428,7 +428,10 @@ class WindowsKeyExtractor(BaseKeyExtractor):
             )
             if v4_keys:
                 candidate_count += len(v4_keys)
-                key_bytes = self._find_valid_v4_key(
+                found_keys.update(self._match_binary_candidates(
+                    v4_keys, db_infos, started_at, stop_event,
+                ))
+                key_bytes = None if self.select_account_keys(found_keys) else self._find_valid_v4_key(
                     v4_keys,
                     db_path,
                     started_at,
@@ -439,7 +442,7 @@ class WindowsKeyExtractor(BaseKeyExtractor):
                     found_keys[self._key_path_for_db(db_path)] = key_bytes.hex().upper()
 
             for start_addr, region_size in addresses:
-                if self._has_message_key(found_keys):
+                if self.select_account_keys(found_keys):
                     break
                 if stop_event is not None and stop_event.is_set():
                     cancelled = True
@@ -472,17 +475,12 @@ class WindowsKeyExtractor(BaseKeyExtractor):
                             if hex_candidate_count > self.MAX_CANDIDATE_KEYS:
                                 break
 
-                            logger.debug(
-                                f"发现候选密钥: key={hex_key[:16]}... salt={hex_salt[:8]}..."
-                            )
-
                             # 尝试验证
                             key_bytes = bytes.fromhex(hex_key)
-                            if db_path and self.verify_key(key_bytes, db_path):
-                                logger.info("密钥验证成功!")
-                                found_keys[self._key_path_for_db(db_path)] = hex_key
-                                # 找到有效密钥后继续扫描，收集所有可能的密钥
-                                break
+                            for info in salt_to_infos.get(hex_salt.lower(), []):
+                                path = str(info["path"])
+                                if self.verify_key(key_bytes, path):
+                                    found_keys[self._key_path_for_db(path)] = hex_key
 
                         if cancelled or hex_candidate_count > self.MAX_CANDIDATE_KEYS:
                             break
@@ -728,6 +726,19 @@ class WindowsKeyExtractor(BaseKeyExtractor):
         if keys:
             logger.info(f"发现 WeChat 4.x 二进制候选密钥: {len(keys)} 个")
         return keys
+
+    def _match_binary_candidates(self, keys, db_infos, started_at, stop_event):
+        """Match per-database AES keys across accounts, never just the first DB."""
+        found = {}
+        for key in keys:
+            for info in db_infos:
+                if ((stop_event is not None and stop_event.is_set())
+                        or time.monotonic() - started_at > self.SCAN_TIMEOUT_SECONDS):
+                    return found
+                path = str(info["rel_path"])
+                if path not in found and self._verify_direct_aes_key(key, info["page1"]):
+                    found[path] = key.hex().upper()
+        return found
 
     def _find_valid_v4_key(
         self,

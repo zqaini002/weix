@@ -349,10 +349,14 @@ if _frontend_dir.exists():
 
 # --- 独立运行入口 ---
 if __name__ == "__main__":
+    if getattr(sys, "frozen", False):
+        import os
+        from app.utils.paths import get_base_dir
+        os.chdir(get_base_dir())
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     uvicorn.run(
-        "app.main:app",
+        app,
         host="0.0.0.0",
         port=8000,
         log_level="info",
